@@ -565,7 +565,7 @@ static int set_cfg_value(pam_handle_t *pamh, const char *key, const char *val,
     start += strspn(start, "\r\n");
     stop   = start;
   }
-  
+
   // Replace [start..stop] with the new contents.
   size_t val_len = strlen(val);
   size_t total_len = key_len + val_len + 4;
@@ -1289,6 +1289,30 @@ static int parse_user(pam_handle_t *pamh, const char *name, uid_t *uid) {
   return 0;
 }
 
+/* Check all possible types of verification codes.
+ */
+static int check_code(pam_handle_t *pamh,
+                      const char*secret_filename, int *updated,
+                      char **buf, const uint8_t*secret,
+                      int secretLen, int code, Params *params,
+                      long hotp_counter,
+                      int *must_advance_counter) {
+  int res;
+  if ((res = check_scratch_codes(pamh, secret_filename, updated, *buf, code)) == 1) {
+    if (hotp_counter > 0) {
+      return check_counterbased_code(pamh, secret_filename, updated,
+                                     buf, secret, secretLen, code,
+                                     params, hotp_counter,
+                                     must_advance_counter);
+    } else {
+      return check_timebased_code(pamh, secret_filename, updated, buf,
+                                   secret, secretLen, code, params);
+    }
+  }
+  return res;
+}
+
+
 static int parse_args(pam_handle_t *pamh, int argc, const char **argv,
                       Params *params) {
   params->echocode = PAM_PROMPT_ECHO_OFF;
@@ -1449,38 +1473,17 @@ static int google_authenticator(pam_handle_t *pamh, int flags,
         }
       }
 
+
       // Check all possible types of verification codes.
-      switch (check_scratch_codes(pamh, secret_filename, &updated, buf, code)){
-      case 1:
-        if (hotp_counter > 0) {
-          switch (check_counterbased_code(pamh, secret_filename, &updated,
-                                          &buf, secret, secretLen, code,
-                                          &params, hotp_counter,
-                                          &must_advance_counter)) {
-          case 0:
-            rc = PAM_SUCCESS;
-            break;
-          case 1:
-            goto invalid;
-          default:
-            break;
-          }
-        } else {
-          switch (check_timebased_code(pamh, secret_filename, &updated, &buf,
-                                       secret, secretLen, code, &params)) {
-          case 0:
-            rc = PAM_SUCCESS;
-            break;
-          case 1:
-            goto invalid;
-          default:
-            break;
-          }
-        }
-        break;
+      switch (check_code(pamh, secret_filename, &updated,
+                         &buf, secret, secretLen, code,
+                         &params, hotp_counter,
+                         &must_advance_counter)){
       case 0:
         rc = PAM_SUCCESS;
         break;
+      case 1:
+        goto invalid;
       default:
         break;
       }
