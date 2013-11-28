@@ -1,0 +1,7 @@
+*.o
+libpam/google-authenticator
+libpam/google-authenticator-chktoken
+libpam/pam_google_authenticator.so
+libpam/pam_google_authenticator_testing.so
+libpam/pam_google_authenticator_unittest
+libpam/demo
