@@ -29,8 +29,8 @@ DEF_LDFLAGS := $(shell [ `uname` = SunOS ] && echo ' -mimpure-text') $(LDFLAGS)
 LDL_LDFLAGS := $(shell $(CC) -shared -ldl -xc -o /dev/null /dev/null          \
                        >/dev/null 2>&1 && echo ' -ldl')
 
-all: google-authenticator pam_google_authenticator.so demo                    \
-     pam_google_authenticator_unittest
+all: google-authenticator pam_google_authenticator.so  demo                    \
+     gauth_chktoken pam_google_authenticator_unittest
 
 test: pam_google_authenticator_unittest
 	./pam_google_authenticator_unittest
@@ -65,41 +65,54 @@ install: all
 	                   /usr/local/bin/google-authenticator
 
 clean:
-	$(RM) *.o *.so core google-authenticator demo                         \
+	$(RM) *.o *.so core google-authenticator gauth_chktoken demo          \
 	               pam_google_authenticator_unittest                      \
 	               libpam-google-authenticator-*-source.tar.bz2
 
+
+google-authenticator.o: google-authenticator.c base32.h hmac.h sha1.h
 google-authenticator: google-authenticator.o base32.o hmac.o sha1.o
 	$(CC) -g $(DEF_LDFLAGS) -o $@ $+ $(LDL_LDFLAGS)
 
-demo: demo.o pam_google_authenticator_demo.o base32.o hmac.o sha1.o
+
+pam_google_authenticator.o: pam_google_authenticator.c support.h base32.h     \
+														hmac.h sha1.h
+pam_google_authenticator.so: support.o base32.o hmac.o sha1.o
+
+
+gauth_chktoken.o: gauth_chktoken.c support.h
+gauth_chktoken: gauth_chktoken.o support.o base32.o hmac.o sha1.o
+	$(CC) -g $(DEF_LDFLAGS) -o $@ $+ $(LDL_LDFLAGS)
+
+
+pam_google_authenticator_demo.o: pam_google_authenticator.c support.h 				\
+																 base32.h hmac.h sha1.h
+	$(CC) -DDEMO --std=gnu99 -Wall -O2 -g -fPIC -c $(DEF_CFLAGS) -o $@ $<
+demo: demo.o pam_google_authenticator_demo.o support.o base32.o hmac.o sha1.o
 	$(CC) -g $(DEF_LDFLAGS) -rdynamic -o $@ $+ $(LDL_LDFLAGS)
 
+
+support_testing.o: support.c support.h base32.h hmac.h sha1.h
+	$(CC) -DTESTING --std=gnu99 -Wall -O2 -g -fPIC -c $(DEF_CFLAGS) -o $@ $<
+pam_google_authenticator_testing.o: pam_google_authenticator.c support.h		  \
+																		base32.h hmac.h sha1.h
+	$(CC) -DTESTING --std=gnu99 -Wall -O2 -g -fPIC -c $(DEF_CFLAGS) -o $@ $<
+pam_google_authenticator_testing.so: support_testing.o base32.o hmac.o sha1.o
+pam_google_authenticator_unittest.o: pam_google_authenticator_unittest.c      \
+                                     pam_google_authenticator_testing.so      \
+                                     base32.h hmac.h sha1.h
 pam_google_authenticator_unittest: pam_google_authenticator_unittest.o        \
                                    base32.o hmac.o sha1.o
 	$(CC) -g $(DEF_LDFLAGS) -rdynamic -o $@ $+ -lc $(LDL_LDFLAGS)
 
-pam_google_authenticator.so: base32.o hmac.o sha1.o
-pam_google_authenticator_testing.so: base32.o hmac.o sha1.o
 
-pam_google_authenticator.o: pam_google_authenticator.c base32.h hmac.h sha1.h
-pam_google_authenticator_demo.o: pam_google_authenticator.c base32.h hmac.h   \
-	                         sha1.h
-	$(CC) -DDEMO --std=gnu99 -Wall -O2 -g -fPIC -c $(DEF_CFLAGS) -o $@ $<
-pam_google_authenticator_testing.o: pam_google_authenticator.c base32.h       \
-                                    hmac.h sha1.h
-	$(CC) -DTESTING --std=gnu99 -Wall -O2 -g -fPIC -c $(DEF_CFLAGS)       \
-              -o $@ $<
-pam_google_authenticator_unittest.o: pam_google_authenticator_unittest.c      \
-                                     pam_google_authenticator_testing.so      \
-                                     base32.h hmac.h sha1.h
-google-authenticator.o: google-authenticator.c base32.h hmac.h sha1.h
-demo.o: demo.c base32.h hmac.h sha1.h
+support.o: support.c support.h base32.h hmac.h sha1.h
 base32.o: base32.c base32.h
 hmac.o: hmac.c hmac.h sha1.h
 sha1.o: sha1.c sha1.h
 
 .c.o:
-	$(CC) --std=gnu99 -Wall -O2 -g -fPIC -c $(DEF_CFLAGS) -o $@ $<
+	# $(CC) --std=gnu99 -Wall -O2 -g -fPIC -c $(DEF_CFLAGS) -o $@ $<
+	$(CC) --std=gnu99 -Wall -g -O0 -fno-inline -fPIC -c $(DEF_CFLAGS) -o $@ $<
 .o.so:
 	$(CC) -shared -g $(DEF_LDFLAGS) -o $@ $+ -lpam
