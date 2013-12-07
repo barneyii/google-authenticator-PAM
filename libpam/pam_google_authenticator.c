@@ -20,6 +20,7 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <pwd.h>
+#include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -29,6 +30,7 @@
 #include <syslog.h>
 #include <time.h>
 #include <unistd.h>
+#include <wait.h>
 
 #ifdef linux
 // We much rather prefer to use setfsuid(), but this function is unfortunately
@@ -56,8 +58,10 @@
 
 #include "support.h"
 
+#define MAX_PASS 200
 #define MODULE_NAME "pam_google_authenticator"
 #define SECRET      "~/.google_authenticator"
+#define CHKTOKEN_HELPER "/usr/sbin/gauth_chktoken"
 
 #if defined(DEMO) || defined(TESTING)
 static char error_msg[128];
@@ -461,6 +465,19 @@ static int parse_args(pam_handle_t *pamh, int argc, const char **argv,
     } else if (!strcmp(argv[i], "echo-verification-code") ||
                !strcmp(argv[i], "echo_verification_code")) {
       params->echocode = PAM_PROMPT_ECHO_ON;
+    } else if ( !strcmp(argv[i], "use_helper") || !memcmp(argv[i], "use_helper=", 11)) {
+      char *helper_path;
+      params->use_helper = 1;
+      if (!memcmp(argv[i], "use_helper=", 11)) {
+        helper_path = strdup(argv[i]+11);
+        if ( access(helper_path, F_OK) < 0 ){
+          log_message(LOG_ERR, NULL, "failed to find \"%s\": %s", helper_path, strerror (errno));
+          helper_path = CHKTOKEN_HELPER;
+        }
+      } else {
+        helper_path = CHKTOKEN_HELPER;
+      }
+      params->helper_path = helper_path;
     } else {
       log_message(LOG_ERR, pamh, "Unrecognized option \"%s\"", argv[i]);
       return -1;
@@ -469,38 +486,211 @@ static int parse_args(pam_handle_t *pamh, int argc, const char **argv,
   return 0;
 }
 
-// static int auth_local(){
+int read_forwarded_pw(char **pw){
+  char *buf = malloc(MAX_PASS+1);
+  if( (*pw = fgets(buf, MAX_PASS, stdin)) ) {
+    // remove newline
+    int len = strlen(buf);
+    if( buf[len-1] == '\n')
+      buf[len-1] = 0;
+    return 0;
+  } else {
+    return -1;
+  }
+}
 
-// }
+static int run_helper_binary(pam_handle_t *pamh,
+                             Params *params,
+                             const char *secret_filename,
+                             const char *pw,
+                             char **forwarded_pw ){
+  int retval = PAM_SESSION_ERR;
+  int child, p2c[2], c2p[2];
+  struct sigaction newsa, oldsa;
 
-static int google_authenticator(pam_handle_t *pamh, int flags,
-                                int argc, const char **argv) {
+  // create pipes for bidirectional communication with helper
+  if (pipe(p2c) != 0 || pipe(c2p) != 0 ) {
+    log_message(LOG_ERR, pamh, "could not make pipe");
+    return retval;
+  }
+
+  /*
+   * This code arranges that the demise of the child does not cause
+   * the application to receive a signal it is not expecting - which
+   * may kill the application or worse.
+   */
+  memset(&newsa, '\0', sizeof(newsa));
+  newsa.sa_handler = SIG_DFL;
+  sigaction(SIGCHLD, &newsa, &oldsa);
+
+  /* fork */
+  child = fork();
+
+  if (child == 0) { /* child fork */
+    static char *envp[] = { NULL };
+    char *args[] = { NULL, NULL, NULL, NULL, NULL };
+
+    // close unneeded fds
+    close(c2p[0]);
+    close(p2c[1]);
+    // redirect pipe to stdin
+    dup2(p2c[0], STDIN_FILENO);
+    // redirect stdout to pipe
+    dup2(c2p[1], STDOUT_FILENO);
+
+
+    // struct rlimit rlim;EFAULT
+    // int i=0;
+    // if (getrlimit(RLIMIT_NOFILE,&rlim)==0) {
+    //         if (rlim.rlim_max >= MAX_FD_NO)
+    //               rlim.rlim_max = MAX_FD_NO;
+    //   for (i=0; i < (int)rlim.rlim_max; i++) {
+    //   if (i != STDIN_FILENO)
+    //     close(i);
+    //   }
+    // }
+
+    /* exec binary helper */
+    args[0] = strdup(params->helper_path);
+    args[1] = strdup(secret_filename);
+
+    if (params->nullok) {
+      args[2]=strdup("nullok");
+    } else {
+      args[2]=strdup("nonull");
+    }
+
+    if (params->forward_pass) {
+      args[3]=strdup("forward_pass");
+    } else {
+      args[3]=strdup("no_forward_pass");
+    }
+
+    execve(params->helper_path, args, envp);
+
+    /* should not get here: exit with error */
+    log_message(LOG_ERR, pamh, "helper binary is not available: %s (%s)", strerror(errno), errno);
+    _exit(PAM_AUTHINFO_UNAVAIL);
+  }
+  else if (child > 0) { /* parent fork */
+    // redirect pipe to stdin
+    dup2(c2p[0], STDIN_FILENO);
+
+    /* send the password to the child */
+    if (pw != NULL) {
+        if (dprintf(p2c[1], "%s\n", pw) != strlen(pw)+1) {
+          log_message(LOG_ERR, pamh, "Cannot send password to helper: %s", strerror(errno));
+          retval = PAM_AUTH_ERR;
+        }
+    } else {  /* blank password */
+        if (dprintf(p2c[1], "\n") == -1) {
+          log_message(LOG_ERR, pamh, "Cannot send password to helper: %s", strerror(errno));
+          retval = PAM_AUTH_ERR;
+        }
+    }
+
+    /* read forwarded_pw from child */
+    if (params->forward_pass){
+      read_forwarded_pw(forwarded_pw);
+    }
+
+    // close pipe fds
+    close(p2c[0]); /* close here to avoid possible SIGPIPE above if helper fails */
+    close(c2p[1]); /* ... */
+    close(c2p[0]);
+    close(p2c[1]);
+
+    /* wait for helper to complete: */
+    int rc = 0;
+    while ((rc=waitpid(child, &retval, 0)) < 0 && errno == EINTR);
+    if (rc<0) {
+      log_message(LOG_ERR, pamh, "gauth_chktoken waitpid returned %d: %s", rc, strerror(errno));
+      retval = PAM_AUTH_ERR;
+    } else if (!WIFEXITED(retval)) {
+      log_message(LOG_ERR, pamh, "gauth_chktoken abnormal exit: %d", retval);
+      retval = PAM_AUTH_ERR;
+    } else {
+      retval = WEXITSTATUS(retval);
+    }
+  }
+  else { /* fork failed */
+    log_message(LOG_ERR, pamh, "fork failed");
+    close(c2p[0]);
+    close(c2p[1]);
+    close(p2c[0]);
+    close(p2c[1]);
+    retval = PAM_AUTH_ERR;
+  }
+
+  sigaction(SIGCHLD, &oldsa, NULL);   /* restore old signal handler */
+
+  log_message(LOG_INFO, pamh, "returning: %d", retval);
+  return retval;
+}
+
+static int auth_helper(pam_handle_t *pamh,
+                       Params *params,
+                       const char *secret_filename){
+  int rc = PAM_SESSION_ERR;
+  char *forwarded_pw = NULL;
+  char *pw = NULL;
+
+  if (params->pass_mode == USE_FIRST_PASS ||
+      params->pass_mode == TRY_FIRST_PASS) {
+    pw = get_first_pass(pamh);
+    rc = run_helper_binary(pamh, params, secret_filename, pw, &forwarded_pw);
+  }
+  if (params->pass_mode == PROMPT ||
+      (rc != PAM_SUCCESS && params->pass_mode == TRY_FIRST_PASS) ) {
+    pw = request_pass(pamh, params->echocode,
+                            params->forward_pass ?
+                            "Password & verification code: " :
+                            "Verification code: ");
+    rc = run_helper_binary(pamh, params, secret_filename, pw, &forwarded_pw);
+  }
+
+  log_message(LOG_INFO, pamh, "helper returned forwarded_pw: %s", forwarded_pw);
+
+  // Update the system password, if we were asked to forward
+  // the system password. We already removed the verification
+  // code from the end of the password.
+  if (rc == PAM_SUCCESS && params->forward_pass) {
+    if (!forwarded_pw || pam_set_item(pamh, PAM_AUTHTOK, forwarded_pw) != PAM_SUCCESS) {
+      rc = PAM_SESSION_ERR;
+    }
+  }
+
+  // Clear out password and deallocate memory
+  if (pw) {
+    memset(pw, 0, strlen(pw));
+    free(pw);
+  }
+  if (forwarded_pw) {
+    memset(forwarded_pw, 0, strlen(forwarded_pw));
+    free(forwarded_pw);
+  }
+
+  return rc;
+}
+
+static int auth_local(pam_handle_t *pamh,
+                      Params *params,
+                      const char *username,
+                      char *secret_filename,
+                      int uid ){
   int        rc = PAM_SESSION_ERR;
-  const char *username;
-  char       *secret_filename = NULL;
-  int        uid = -1, old_uid = -1, old_gid = -1, fd = -1;
+  int        fd = -1;
   off_t      filesize = 0;
   time_t     mtime = 0;
   char       *buf = NULL;
   uint8_t    *secret = NULL;
   int        secretLen = 0;
-
-#if defined(DEMO) || defined(TESTING)
-  *error_msg = '\000';
-#endif
-
-  // Handle optional arguments that configure our PAM module
-  Params params = { 0 };
-  if (parse_args(pamh, argc, argv, &params) < 0) {
-    return rc;
-  }
+  int        old_uid = -1, old_gid = -1;
 
   // Read and process status file, then ask the user for the verification code.
   int early_updated = 0, updated = 0;
-  if ((username = get_user_name(pamh)) &&
-      (secret_filename = get_secret_filename(pamh, &params, username, &uid)) &&
-      !drop_privileges(pamh, username, uid, &old_uid, &old_gid) &&
-      (fd = open_secret_file(pamh, secret_filename, &params, username, uid,
+  if (!drop_privileges(pamh, username, uid, &old_uid, &old_gid) &&
+      (fd = open_secret_file(pamh, secret_filename, params, username, uid,
                              &filesize, &mtime)) >= 0 &&
       (buf = read_file_contents(pamh, secret_filename, &fd, filesize)) &&
       (secret = get_shared_secret(pamh, secret_filename, buf, &secretLen)) &&
@@ -529,8 +719,8 @@ static int google_authenticator(pam_handle_t *pamh, int flags,
       switch (mode) {
       case 0: // Extract possible verification code
       case 1: // Extract possible scratch code
-        if (params.pass_mode == USE_FIRST_PASS ||
-            params.pass_mode == TRY_FIRST_PASS) {
+        if (params->pass_mode == USE_FIRST_PASS ||
+            params->pass_mode == TRY_FIRST_PASS) {
           pw = get_first_pass(pamh);
         }
         break;
@@ -540,16 +730,16 @@ static int google_authenticator(pam_handle_t *pamh, int flags,
           rc = PAM_SESSION_ERR;
           continue;
         }
-        if (params.pass_mode == PROMPT ||
-            params.pass_mode == TRY_FIRST_PASS) {
+        if (params->pass_mode == PROMPT ||
+            params->pass_mode == TRY_FIRST_PASS) {
           if (!saved_pw) {
             // If forwarding the password to the next stacked PAM module,
             // we cannot tell the difference between an eight digit scratch
             // code or a two digit password immediately followed by a six
             // digit verification code. We have to loop and try both
             // options.
-            saved_pw = request_pass(pamh, params.echocode,
-                                    params.forward_pass ?
+            saved_pw = request_pass(pamh, params->echocode,
+                                    params->forward_pass ?
                                     "Password & verification code: " :
                                     "Verification code: ");
           }
@@ -588,7 +778,7 @@ static int google_authenticator(pam_handle_t *pamh, int flags,
       int code = (int)l;
       memset(pw + pw_len - expected_len, 0, expected_len);
 
-      if ((mode == 2 || mode == 3) && !params.forward_pass) {
+      if ((mode == 2 || mode == 3) && !params->forward_pass) {
         // We are explicitly configured so that we don't try to share
         // the password with any other stacked PAM module. We must
         // therefore verify that the user entered just the verification
@@ -602,7 +792,7 @@ static int google_authenticator(pam_handle_t *pamh, int flags,
       // Check all possible types of verification codes.
       switch (check_code(pamh, secret_filename, &updated,
                          &buf, secret, secretLen, code,
-                         &params, hotp_counter,
+                         params, hotp_counter,
                          &must_advance_counter)){
       case 0:
         rc = PAM_SUCCESS;
@@ -619,7 +809,7 @@ static int google_authenticator(pam_handle_t *pamh, int flags,
     // Update the system password, if we were asked to forward
     // the system password. We already removed the verification
     // code from the end of the password.
-    if (rc == PAM_SUCCESS && params.forward_pass) {
+    if (rc == PAM_SUCCESS && params->forward_pass) {
       if (!pw || pam_set_item(pamh, PAM_AUTHTOK, pw) != PAM_SUCCESS) {
         rc = PAM_SESSION_ERR;
       }
@@ -655,7 +845,7 @@ static int google_authenticator(pam_handle_t *pamh, int flags,
   // If the user has not created a state file with a shared secret, and if
   // the administrator set the "nullok" option, this PAM module completes
   // successfully, without ever prompting the user.
-  if (params.nullok == SECRETNOTFOUND) {
+  if (params->nullok == SECRETNOTFOUND) {
     rc = PAM_SUCCESS;
   }
 
@@ -692,6 +882,36 @@ static int google_authenticator(pam_handle_t *pamh, int flags,
     memset(secret, 0, secretLen);
     free(secret);
   }
+  return rc;
+}
+
+static int google_authenticator(pam_handle_t *pamh, int flags,
+                                int argc, const char **argv) {
+  int        rc = PAM_SESSION_ERR;
+  const char *username;
+  char *secret_filename = NULL;
+  int        uid = -1;
+
+
+#if defined(DEMO) || defined(TESTING)
+  *error_msg = '\000';
+#endif
+
+  // Handle optional arguments that configure our PAM module
+  Params params = { 0 };
+  if (parse_args(pamh, argc, argv, &params) < 0) {
+    return rc;
+  }
+
+  if ((username = get_user_name(pamh)) &&
+      (secret_filename = get_secret_filename(pamh, &params, username, &uid)) ){
+    if (params.use_helper){
+      rc = auth_helper(pamh, &params, secret_filename);
+    } else {
+      rc = auth_local(pamh, &params, username, secret_filename, uid);
+    }
+  }
+
   return rc;
 }
 

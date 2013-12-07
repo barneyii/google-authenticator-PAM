@@ -156,7 +156,7 @@ static const char *getURL(const char *secret, const char *label,
     const char *encoder = "https://www.google.com/chart?chs=200x200&"
                           "chld=M|0&cht=qr&chl=";
     const char *encodedURL = urlEncode(url);
-    
+
     *encoderURL = strcat(strcpy(malloc(strlen(encoder) +
                                        strlen(encodedURL) + 1),
                                 encoder), encodedURL);
@@ -738,7 +738,7 @@ int main(int argc, char *argv[]) {
                    secret, sizeof(secret), ratelimit);
   } else if (r_limit > 0 && r_time > 0) {
     char buf[80];
-    sprintf(buf, "\"RATE_LIMIT %d %d\n", r_limit, r_time);
+    sprintf(buf, "\" RATE_LIMIT %d %d\n", r_limit, r_time);
     addOption(secret, sizeof(secret), buf);
   }
 

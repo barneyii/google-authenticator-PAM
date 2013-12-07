@@ -16,6 +16,8 @@ typedef struct Params {
   uid_t      uid;
   enum { PROMPT = 0, TRY_FIRST_PASS, USE_FIRST_PASS } pass_mode;
   int        forward_pass;
+  int        use_helper;
+  char      *helper_path;
 } Params;
 
 

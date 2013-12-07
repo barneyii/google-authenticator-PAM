@@ -62,7 +62,10 @@ install: all
 	echo cp google-authenticator /usr/local/bin;                          \
 	tar fc - google-authenticator | $${sudo} tar ofxC - /usr/local/bin;   \
 	$${sudo} chmod 755 $${dst}/pam_google_authenticator.so                \
-	                   /usr/local/bin/google-authenticator
+	                   /usr/local/bin/google-authenticator;               \
+                                                                        \
+  echo cp gauth_chktoken /usr/sbin;                                     \
+  $${sudo} chmod 6755 /usr/sbin/gauth_chktoken;                         \
 
 clean:
 	$(RM) *.o *.so core google-authenticator gauth_chktoken demo          \
@@ -87,7 +90,8 @@ gauth_chktoken: gauth_chktoken.o support.o base32.o hmac.o sha1.o
 
 pam_google_authenticator_demo.o: pam_google_authenticator.c support.h 				\
 																 base32.h hmac.h sha1.h
-	$(CC) -DDEMO --std=gnu99 -Wall -O2 -g -fPIC -c $(DEF_CFLAGS) -o $@ $<
+	# $(CC) -DDEMO --std=gnu99 -Wall -O2 -g -fPIC -c $(DEF_CFLAGS) -o $@ $<
+	$(CC) -DDEMO --std=gnu99 -Wall -O0 -g -fPIC -c $(DEF_CFLAGS) -o $@ $<
 demo: demo.o pam_google_authenticator_demo.o support.o base32.o hmac.o sha1.o
 	$(CC) -g $(DEF_LDFLAGS) -rdynamic -o $@ $+ $(LDL_LDFLAGS)
 

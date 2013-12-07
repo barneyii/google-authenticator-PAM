@@ -2,7 +2,7 @@
 
 #include <sys/param.h>
 
-#define MAX_PASS 256
+#define MAX_PASS 208 /* cater for pw and code when using forward_pass */
 #define MAX_USERNAME 32
 
 #include <errno.h>
@@ -117,7 +117,6 @@ static int parse_args(const int argc, const char **argv,
   *owner_uid = sb.st_uid;
 
   // param 1: secret_filename
-
   *secret_filename = strdup(argv[1]);
   if ( access(*secret_filename, F_OK) < 0 ){
     log_message(LOG_ERR, NULL, "failed to find \"%s\": %s", *secret_filename, strerror (errno));
@@ -320,6 +319,7 @@ int read_password(char **pw){
 
 int main(int argc, const char *argv[]) {
   int        rc = PAM_SESSION_ERR;
+  pam_handle_t *pamh = NULL;
   Params     params = { 0 };
   char       *secret_filename = NULL;
   char       *pw = NULL;
@@ -327,7 +327,7 @@ int main(int argc, const char *argv[]) {
   char       *forwarded_pw = NULL;
 
   if (isatty(STDIN_FILENO) || argc != 4 ) {
-    log_message(LOG_NOTICE, NULL, "inappropriate use of chktoken helper binary");
+    log_message(LOG_NOTICE, pamh, "inappropriate use of chktoken helper binary");
     return PAM_SYSTEM_ERR;
   }
 
@@ -341,12 +341,13 @@ int main(int argc, const char *argv[]) {
   rc = check_pw(secret_filename, pw, owner_uid, &forwarded_pw, &params);
 
   // return forwarded_pw via pipe
-  if (rc == PAM_SUCCESS){
-    fputs(forwarded_pw, stdout);
+  if (!forwarded_pw)
+    forwarded_pw = strdup("");
+  if (dprintf(STDOUT_FILENO, "%s\n", forwarded_pw) != strlen(forwarded_pw)+1) {
+    log_message(LOG_ERR, pamh, "Cannot send forwarded password back to Google Auth PAM: %s", strerror(errno));
   }
 
   // clean up
-  free(secret_filename);
   if (pw) {
     memset(pw, 0, strlen(pw));
     free(pw);

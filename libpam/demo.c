@@ -115,7 +115,7 @@ int pam_set_item(pam_handle_t *pamh, int item_type,
 
 static void print_diagnostics(int signo) {
   extern const char *get_error_msg(void);
-  assert(!tcsetattr(0, TCSAFLUSH, &old_termios));
+  // assert(!tcsetattr(0, TCSAFLUSH, &old_termios));
   fprintf(stderr, "%s\n", get_error_msg());
   _exit(1);
 }
