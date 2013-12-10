@@ -80,6 +80,23 @@ to be configured with the "use_first_pass" option.
 In turn, "pam_google_authenticator" module also supports both the standard
 "use_first_pass" and "try_first_pass" options. But most users would not need
 to set those on the "pam_google_authenticator".
+NOTE: if the "try_first_pass" option is used in conjunction with "use_helper",
+the number of attempts the user will be given will be effectively halved.
+You should adjust the "rate-limit" option in the google-authenticator utility
+with this in mind.
+
+By default, a user can read their own secret file, which makes the PAM module
+useless for securing anything post-login. You can get around this limitation
+with the "use_helper" option, which causes code verification to be routed through
+a setuid helper (by default /usr/sbin/gauth_chktoken).
+
+  auth required pam_google_authenticator.so use_helper
+
+You can enable the helper and specify its location at the same time with the
+"use_helper=" option:
+
+  auth required pam_google_authenticator.so use_helper=/usr/sbin/gauth_chktoken
+
 
 If you would like verification codes that are counter based instead of
 timebased, use the "google-authenticator" binary to generate a secret key in
