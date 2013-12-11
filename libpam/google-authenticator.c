@@ -36,6 +36,8 @@
 #include "sha1.h"
 
 #define SECRET                    "/.google_authenticator"
+#define CONFIG_FILE               "/etc/google-authenticator.conf"
+#define MAXLINELENGTH             1024
 #define SECRET_BITS               80          // Must be divisible by eight
 #define VERIFICATION_CODE_MODULUS (1000*1000) // Six digits
 #define SCRATCHCODES              5           // Number of initial scratchcodes
@@ -173,6 +175,15 @@ static const char *getURL(const char *secret, const char *label,
 #define UTF8_BOTH         "\xE2\x96\x88"
 #define UTF8_TOPHALF      "\xE2\x96\x80"
 #define UTF8_BOTTOMHALF   "\xE2\x96\x84"
+
+static uid_t get_current_uid(){
+  char *uid_s;
+  if ( (uid_s = getenv("SUDO_UID")) ){
+    return (uid_t) strtol(uid_s, NULL, 10);
+  } else {
+    return getuid();
+  }
+}
 
 static void displayQRCode(const char *secret, const char *label,
                           const int use_totp) {
@@ -327,6 +338,94 @@ static char *maybeAddOption(const char *msg, char *buf, size_t nbuf,
   return buf;
 }
 
+static char *get_secret_filename(const char *secret_spec) {
+  // Check whether the administrator decided to override the default location
+  // for the secret file.
+  const char *spec = secret_spec ? secret_spec : SECRET;
+
+  // Obtain the current user's name and home directory
+  struct passwd pwbuf, *pw = NULL;
+  char *buf = NULL;
+  char *secret_filename = NULL;
+  #ifdef _SC_GETPW_R_SIZE_MAX
+  int len = sysconf(_SC_GETPW_R_SIZE_MAX);
+  if (len <= 0) {
+    len = 4096;
+  }
+  #else
+  int len = 4096;
+  #endif
+  buf = malloc(len);
+  if (buf == NULL ||
+      getpwuid_r(get_current_uid(), &pwbuf, buf, len, &pw) ||
+      !pw ||
+      !pw->pw_dir ||
+      *pw->pw_dir != '/') {
+  err:
+    fprintf(stderr, "Failed to compute location of secret file: %s\n", strerror(errno));
+    free(buf);
+    free(secret_filename);
+    return NULL;
+  }
+
+  // Expand filename specification to an actual filename.
+  if ((secret_filename = strdup(spec)) == NULL) {
+    goto err;
+  }
+  int allow_tilde = 1;
+  for (int offset = 0; secret_filename[offset];) {
+    char *cur = secret_filename + offset;
+    char *var = NULL;
+    size_t var_len = 0;
+    const char *subst = NULL;
+    if (allow_tilde && *cur == '~') {
+      var_len = 1;
+      if (!pw) {
+        goto err;
+      }
+      subst = pw->pw_dir;
+      var = cur;
+    } else if (secret_filename[offset] == '$') {
+      if (!memcmp(cur, "${HOME}", 7)) {
+        var_len = 7;
+        if (!pw) {
+          goto err;
+        }
+        subst = pw->pw_dir;
+        var = cur;
+      } else if (!memcmp(cur, "${USER}", 7)) {
+        var_len = 7;
+        subst = pw->pw_name;
+        var = cur;
+      }
+    }
+    if (var) {
+      size_t subst_len = strlen(subst);
+      char *resized = realloc(secret_filename,
+                              strlen(secret_filename) + subst_len);
+      if (!resized) {
+        goto err;
+      }
+      var += resized - secret_filename;
+      secret_filename = resized;
+      memmove(var + subst_len, var + var_len, strlen(var + var_len) + 1);
+      memmove(var, subst, subst_len);
+      offset = var + subst_len - resized;
+      allow_tilde = 0;
+    } else {
+      allow_tilde = *cur == '/';
+      ++offset;
+    }
+  }
+  free(buf);
+
+  if (!secret_filename) {
+    goto err;
+    _exit(1);
+  }
+  return secret_filename;
+}
+
 static void usage(void) {
   puts(
  "google-authenticator [<options>]\n"
@@ -370,7 +469,230 @@ int main(int argc, char *argv[]) {
   char *secret_fn = NULL;
   char *label = NULL;
   int window_size = 0;
+  int use_helper = 0;
+  char *helper_owner = NULL;
+  uid_t helper_owner_uid;
+  gid_t helper_owner_gid;
+
+  // parse config file
+  char cfg_line[MAXLINELENGTH];
+  FILE *cf;
+  int len;
+  char *optval;
+  if ((cf = fopen(CONFIG_FILE, "r")) == NULL){
+    fprintf(stderr, "failed to find \"%s\": %s\n", CONFIG_FILE, strerror (errno));
+    _exit(1);
+  }
+  while (fgets(cfg_line, MAXLINELENGTH, cf)){
+    if (cfg_line[0] == '#')
+      continue;
+    len = strlen(cfg_line);
+    if (len < 2)
+      continue;
+    if (cfg_line[len-1] == '\n')
+      cfg_line[len-1] = '\0';
+
+
+    if (!memcmp(cfg_line, "use_helper", 10)) {
+      // use_helper
+      if (use_helper) {
+        fprintf(stderr, "Duplicate 'use_helper option detected'\n");
+        _exit(1);
+      }
+      use_helper = 1;
+    } else if (!memcmp(cfg_line, "helper_owner=", 13)) {
+      // helper_owner
+      if (helper_owner) {
+        fprintf(stderr, "Duplicate 'helper_owner option detected'\n");
+        _exit(1);
+      }
+      optval = cfg_line + 13;
+      struct passwd *pw;
+      if ( (pw = getpwnam(optval)) ) {
+        helper_owner = pw->pw_name;
+        helper_owner_uid = pw->pw_uid;
+        helper_owner_gid = pw->pw_gid;
+      } else {
+        fprintf(stderr, "Invalid user: %s: %s\n", optval, strerror (errno));
+        _exit(1);
+      }
+    } else if (!strcmp(cfg_line, "counter-based")) {
+      // counter-based
+      if (mode != ASK_MODE) {
+        fprintf(stderr, "Duplicate 'counter-based' and/or 'time-based' option detected\n");
+        _exit(1);
+      }
+      if (reuse != ASK_REUSE) {
+      reuse_err:
+        fprintf(stderr, "Reuse of tokens is not a meaningful parameter "
+                "when in counter-based mode\n");
+        _exit(1);
+      }
+      mode = HOTP_MODE;
+    } else if (!strcmp(cfg_line, "time-based")) {
+      // time-based
+      if (mode != ASK_MODE) {
+        fprintf(stderr, "Duplicate 'counter-based' and/or 'time-based' option detected\n");
+        _exit(1);
+      }
+      mode = TOTP_MODE;
+    } else if (!strcmp(cfg_line, "disallow-reuse")) {
+      // disallow-reuse
+      if (reuse != ASK_REUSE) {
+        fprintf(stderr, "Duplicate 'allow-reuse' and/or 'disallow-reuse' option detected\n");
+        _exit(1);
+      }
+      if (mode == HOTP_MODE) {
+        goto reuse_err;
+      }
+      reuse = DISALLOW_REUSE;
+    } else if (!strcmp(cfg_line, "allow-reuse")) {
+      // allow-reuse
+      if (reuse != ASK_REUSE) {
+        fprintf(stderr, "Duplicate 'allow-reuse' and/or 'disallow-reuse' option detected\n");
+        _exit(1);
+      }
+      if (mode == HOTP_MODE) {
+        goto reuse_err;
+      }
+      reuse = ALLOW_REUSE;
+    } else if (!strcmp(cfg_line, "force")) {
+      // force
+      if (force) {
+        fprintf(stderr, "Duplicate 'force' option detected\n");
+        _exit(1);
+      }
+      force = 1;
+    } else if (!memcmp(cfg_line, "label=", 6)) {
+      // label
+      if (label) {
+        fprintf(stderr, "Duplicate 'label=' option detected\n");
+        _exit(1);
+      }
+      label = strdup(cfg_line + 6);
+    } else if (!strcmp(cfg_line, "quiet")) {
+      // quiet
+      if (quiet) {
+        fprintf(stderr, "Duplicate 'quiet' option detected\n");
+        _exit(1);
+      }
+      quiet = 1;
+    } else if (!memcmp(cfg_line, "qr-mode=", 8)) {
+      // qr-mode
+      if (qr_mode != QR_UNSET) {
+        fprintf(stderr, "Duplicate 'qr-mode=' option detected\n");
+        _exit(1);
+      }
+      optval = cfg_line + 8;
+      if (!strcasecmp(optval, "none")) {
+        qr_mode = QR_NONE;
+      } else if (!strcasecmp(optval, "ansi")) {
+        qr_mode = QR_ANSI;
+      } else if (!strcasecmp(optval, "utf8")) {
+        qr_mode = QR_UTF8;
+      } else {
+        fprintf(stderr, "Invalid qr-mode \"%s\"\n", optval);
+        _exit(1);
+      }
+    } else if (!memcmp(cfg_line, "rate-limit=", 11)) {
+      // rate-limit
+      if (r_limit > 0) {
+        fprintf(stderr, "Duplicate 'rate-limit' option detected\n");
+        _exit(1);
+      } else if (r_limit < 0) {
+        fprintf(stderr, "'no-rate-limit' is mutually exclusive with 'rate-limit'\n");
+        _exit(1);
+      }
+      optval = cfg_line + 11;
+      char *endptr;
+      errno = 0;
+      long l = strtol(optval, &endptr, 10);
+      if (errno || endptr == optval || *endptr || l < 1 || l > 10) {
+        fprintf(stderr, "'rate-limit' requires an argument in the range 1..10\n");
+        _exit(1);
+      }
+      r_limit = (int)l;
+    } else if (!memcmp(cfg_line, "rate-time=", 10)) {
+      // rate-time
+      if (r_time > 0) {
+        fprintf(stderr, "Duplicate 'rate-time' option detected\n");
+        _exit(1);
+      } else if (r_time < 0) {
+        fprintf(stderr, "'no-rate-limit' is mutually exclusive with 'rate-time'\n");
+        _exit(1);
+      }
+      optval = cfg_line + 10;
+      char *endptr;
+      errno = 0;
+      long l = strtol(optval, &endptr, 10);
+      if (errno || endptr == optval || *endptr || l < 15 || l > 600) {
+        fprintf(stderr, "'rate-time' requires an argument in the range 15..600\n");
+        _exit(1);
+      }
+      r_time = (int)l;
+    } else if (!strcmp(cfg_line, "no-rate-limit")) {
+      // no-rate-limit
+      if (r_limit > 0 || r_time > 0) {
+        fprintf(stderr, "'no-rate-limit' is mutually exclusive with 'rate-limit'/'rate-time'\n");
+        _exit(1);
+      }
+      if (r_limit < 0) {
+        fprintf(stderr, "Duplicate 'no-rate-limit' option detected\n");
+        _exit(1);
+      }
+      r_limit = r_time = -1;
+    } else if (!memcmp(cfg_line, "secret=", 7)) {
+      // secret
+      if (secret_fn) {
+        fprintf(stderr, "Duplicate 'secret' option detected\n");
+        _exit(1);
+      }
+      optval = cfg_line + 7;
+      if (!*optval) {
+        fprintf(stderr, "'secret=' must be followed by a filename\n");
+        _exit(1);
+      }
+      secret_fn = get_secret_filename(optval);
+    } else if (!memcmp(cfg_line, "window-size=", 12)) {
+      // window-size
+      if (window_size) {
+        fprintf(stderr, "Duplicate 'window-size'/'minimal-window' option detected\n");
+        _exit(1);
+      }
+      optval = cfg_line + 12;
+      char *endptr;
+      errno = 0;
+      long l = strtol(optval, &endptr, 10);
+      if (errno || endptr == optval || *endptr || l < 1 || l > 21) {
+        fprintf(stderr, "'window-size' requires an argument in the range 1..21\n");
+        _exit(1);
+      }
+      window_size = (int)l;
+    } else if (!strcmp(cfg_line, "minimal-window")) {
+      // minimal-window
+      if (window_size) {
+        fprintf(stderr, "Duplicate 'window-size'/'minimal-window' option detected\n");
+        _exit(1);
+      }
+      window_size = -1;
+    } else if ((!strcmp(cfg_line, "user=")) ||
+               (!strcmp(cfg_line, "try_first_pass")) ||
+               (!strcmp(cfg_line, "use_first_pass")) ||
+               (!strcmp(cfg_line, "forward_pass")) ||
+               (!strcmp(cfg_line, "noskewadj")) ||
+               (!strcmp(cfg_line, "nullok")) ||
+               (!strcmp(cfg_line, "echo-verification-code")) ||
+               (!strcmp(cfg_line, "echo_verification_code")) ) {
+      // do nothing: these are options for pam_google_authenticator module
+    } else {
+      fprintf(stderr, "Unrecognized option \"%s\"\n", cfg_line);
+      _exit(1);
+    }
+  }
+
+  // parse command line arguments
   int idx;
+  int opts_used[15] = {0};
   for (;;) {
     static const char optstring[] = "+hctdDfl:qQ:r:R:us:w:W";
     static struct option options[] = {
@@ -403,8 +725,17 @@ int main(int argc, char *argv[]) {
     } else if (c < 0) {
       break;
     }
+    // prevent duplicate options
+    if(idx >= 0){
+      if (opts_used[idx]){
+        fprintf(stderr, "Duplicate -%s option detected\n", (char*)&options[idx].val);
+        _exit(1);
+      }
+      opts_used[idx] = 1;
+    }
+
     if (idx-- <= 0) {
-      // Help (or invalid argument)
+      // 0. Help (or invalid argument)
     err:
       usage();
       if (idx < -1) {
@@ -413,29 +744,26 @@ int main(int argc, char *argv[]) {
       }
       exit(0);
     } else if (!idx--) {
-      // counter-based
-      if (mode != ASK_MODE) {
-        fprintf(stderr, "Duplicate -c and/or -t option detected\n");
+      // 1. counter-based
+      if (opts_used[2]) {
+        fprintf(stderr, "Options -c and -t are mutually exclusive\n");
         _exit(1);
       }
       if (reuse != ASK_REUSE) {
-      reuse_err:
-        fprintf(stderr, "Reuse of tokens is not a meaningful parameter "
-                "when in counter-based mode\n");
-        _exit(1);
+        goto reuse_err;
       }
       mode = HOTP_MODE;
     } else if (!idx--) {
-      // time-based
-      if (mode != ASK_MODE) {
-        fprintf(stderr, "Duplicate -c and/or -t option detected\n");
+      // 2. time-based
+      if (opts_used[1]) {
+        fprintf(stderr, "Options -c and -t are mutually exclusive\n");
         _exit(1);
       }
       mode = TOTP_MODE;
     } else if (!idx--) {
-      // disallow-reuse
-      if (reuse != ASK_REUSE) {
-        fprintf(stderr, "Duplicate -d and/or -D option detected\n");
+      // 3. disallow-reuse
+      if (opts_used[4]) {
+        fprintf(stderr, "Options -d and -D are mutually exclusive\n");
         _exit(1);
       }
       if (mode == HOTP_MODE) {
@@ -443,9 +771,9 @@ int main(int argc, char *argv[]) {
       }
       reuse = DISALLOW_REUSE;
     } else if (!idx--) {
-      // allow-reuse
-      if (reuse != ASK_REUSE) {
-        fprintf(stderr, "Duplicate -d and/or -D option detected\n");
+      // 4. allow-reuse
+      if (opts_used[3]) {
+        fprintf(stderr, "Options -d and -D are mutually exclusive\n");
         _exit(1);
       }
       if (mode == HOTP_MODE) {
@@ -453,32 +781,16 @@ int main(int argc, char *argv[]) {
       }
       reuse = ALLOW_REUSE;
     } else if (!idx--) {
-      // force
-      if (force) {
-        fprintf(stderr, "Duplicate -f option detected\n");
-        _exit(1);
-      }
+      // 5. force
       force = 1;
     } else if (!idx--) {
-      // label
-      if (label) {
-        fprintf(stderr, "Duplicate -l option detected\n");
-        _exit(1);
-      }
+      // 6. label
       label = strdup(optarg);
     } else if (!idx--) {
-      // quiet
-      if (quiet) {
-        fprintf(stderr, "Duplicate -q option detected\n");
-        _exit(1);
-      }
+      // 7. quiet
       quiet = 1;
     } else if (!idx--) {
-      // qr-mode
-      if (qr_mode != QR_UNSET) {
-        fprintf(stderr, "Duplicate -Q option detected\n");
-        _exit(1);
-      }
+      // 8. qr-mode
       if (!strcasecmp(optarg, "none")) {
         qr_mode = QR_NONE;
       } else if (!strcasecmp(optarg, "ansi")) {
@@ -490,12 +802,9 @@ int main(int argc, char *argv[]) {
         _exit(1);
       }
     } else if (!idx--) {
-      // rate-limit
-      if (r_limit > 0) {
-        fprintf(stderr, "Duplicate -r option detected\n");
-        _exit(1);
-      } else if (r_limit < 0) {
-        fprintf(stderr, "-u is mutually exclusive with -r\n");
+      // 9. rate-limit
+      if (opts_used[11]) {
+        fprintf(stderr, "Options -u and -r are mutually exclusive\n");
         _exit(1);
       }
       char *endptr;
@@ -507,12 +816,9 @@ int main(int argc, char *argv[]) {
       }
       r_limit = (int)l;
     } else if (!idx--) {
-      // rate-time
-      if (r_time > 0) {
-        fprintf(stderr, "Duplicate -R option detected\n");
-        _exit(1);
-      } else if (r_time < 0) {
-        fprintf(stderr, "-u is mutually exclusive with -R\n");
+      // 10. rate-time
+      if (opts_used[11]) {
+        fprintf(stderr, "Options -u and -R are mutually exclusive\n");
         _exit(1);
       }
       char *endptr;
@@ -524,35 +830,23 @@ int main(int argc, char *argv[]) {
       }
       r_time = (int)l;
     } else if (!idx--) {
-      // no-rate-limit
-      if (r_limit > 0 || r_time > 0) {
+      // 11. no-rate-limit
+      if (opts_used[9] || opts_used[10]) {
         fprintf(stderr, "-u is mutually exclusive with -r/-R\n");
-        _exit(1);
-      }
-      if (r_limit < 0) {
-        fprintf(stderr, "Duplicate -u option detected\n");
         _exit(1);
       }
       r_limit = r_time = -1;
     } else if (!idx--) {
-      // secret
-      if (secret_fn) {
-        fprintf(stderr, "Duplicate -s option detected\n");
-        _exit(1);
-      }
+      // 12. secret
       if (!*optarg) {
         fprintf(stderr, "-s must be followed by a filename\n");
         _exit(1);
       }
-      secret_fn = strdup(optarg);
-      if (!secret_fn) {
-        perror("malloc()");
-        _exit(1);
-      }
+      secret_fn = get_secret_filename(optarg);
     } else if (!idx--) {
-      // window-size
-      if (window_size) {
-        fprintf(stderr, "Duplicate -w/-W option detected\n");
+      // 13. window-size
+      if (opts_used[14]) {
+        fprintf(stderr, "Options -w and -W are mutually exclusive\n");
         _exit(1);
       }
       char *endptr;
@@ -564,9 +858,9 @@ int main(int argc, char *argv[]) {
       }
       window_size = (int)l;
     } else if (!idx--) {
-      // minimal-window
-      if (window_size) {
-        fprintf(stderr, "Duplicate -w/-W option detected\n");
+      // 14. minimal-window
+      if (opts_used[13]) {
+        fprintf(stderr, "Options -w and -W are mutually exclusive\n");
         _exit(1);
       }
       window_size = -1;
@@ -588,7 +882,7 @@ int main(int argc, char *argv[]) {
     _exit(1);
   }
   if (!label) {
-    uid_t uid = getuid();
+    uid_t uid = get_current_uid();
     const char *user = getUserName(uid);
     char hostname[128] = { 0 };
     if (gethostname(hostname, sizeof(hostname)-1)) {
@@ -742,13 +1036,15 @@ int main(int argc, char *argv[]) {
     addOption(secret, sizeof(secret), buf);
   }
 
+  // open/create secret file
   fd = open(tmp_fn, O_WRONLY|O_EXCL|O_CREAT|O_NOFOLLOW|O_TRUNC, 0400);
   if (fd < 0) {
-    fprintf(stderr, "Failed to create \"%s\" (%s)",
+    fprintf(stderr, "Failed to create \"%s\" (%s)\n",
             secret_fn, strerror(errno));
     free(secret_fn);
     return 1;
   }
+  // save secret file
   if (write(fd, secret, strlen(secret)) != (ssize_t)strlen(secret) ||
       rename(tmp_fn, secret_fn)) {
     perror("Failed to write new secret");
@@ -756,6 +1052,13 @@ int main(int argc, char *argv[]) {
     close(fd);
     free(secret_fn);
     return 1;
+  }
+  // try to chown file as helper_owner if config file specifies use_helper
+  if (use_helper && helper_owner){
+    if (chown(secret_fn, helper_owner_uid, helper_owner_gid) < 0){
+      fprintf(stderr, "Failed to chown %s as %s: %s\n", secret_fn, helper_owner, strerror (errno) );
+      _exit(1);
+    }
   }
 
   free(secret_fn);

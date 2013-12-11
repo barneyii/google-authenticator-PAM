@@ -65,7 +65,13 @@ install: all
 	                   /usr/local/bin/google-authenticator;               \
                                                                         \
   echo cp gauth_chktoken /usr/sbin;                                     \
+  sudo cp gauth_chktoken /usr/sbin;                                     \
   $${sudo} chmod 6755 /usr/sbin/gauth_chktoken;                         \
+                                                                        \
+  echo cp google-authenticator.conf.sample                              \
+  				/etc/google-authenticator.conf;                               \
+  $${sudo} cp google-authenticator.conf.sample                          \
+  				/etc/google-authenticator.conf;                               \
 
 clean:
 	$(RM) *.o *.so core google-authenticator gauth_chktoken demo          \

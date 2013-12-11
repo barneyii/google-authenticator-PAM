@@ -52,16 +52,14 @@
 #include <security/pam_appl.h>
 #include <security/pam_modules.h>
 
-// #include "base32.h"
-// #include "hmac.h"
-// #include "sha1.h"
-
 #include "support.h"
 
 #define MAX_PASS 200
+#define MAXLINELENGTH 1024
 #define MODULE_NAME "pam_google_authenticator"
 #define SECRET      "~/.google_authenticator"
 #define CHKTOKEN_HELPER "/usr/sbin/gauth_chktoken"
+#define CONFIG_FILE "/etc/google-authenticator.conf"
 
 #if defined(DEMO) || defined(TESTING)
 static char error_msg[128];
@@ -85,7 +83,7 @@ extern void log_message(int priority, pam_handle_t *pamh,
 
   va_list args;
   va_start(args, format);
-#if !defined(DEMO) && !defined(TESTING)
+#if !defined(TESTING)
   openlog(logname, LOG_CONS | LOG_PID, LOG_AUTHPRIV);
   vsyslog(priority, format, args);
   closelog();
@@ -438,48 +436,98 @@ static int parse_user(pam_handle_t *pamh, const char *name, uid_t *uid) {
   return 0;
 }
 
+static int parse_option(pam_handle_t *pamh, Params *params,
+                        const char *option, int cfg_file){
+  if (!memcmp(option, "secret=", 7)) {
+    free((void *)params->secret_filename_spec);
+    params->secret_filename_spec = strdup(option + 7);
+  } else if (!memcmp(option, "user=", 5)) {
+    uid_t uid;
+    if (parse_user(pamh, option + 5, &uid) < 0) {
+      return -1;
+    }
+    params->fixed_uid = 1;
+    params->uid = uid;
+  } else if (!strcmp(option, "try_first_pass")) {
+    params->pass_mode = TRY_FIRST_PASS;
+  } else if (!strcmp(option, "use_first_pass")) {
+    params->pass_mode = USE_FIRST_PASS;
+  } else if (!strcmp(option, "forward_pass")) {
+    params->forward_pass = 1;
+  } else if (!strcmp(option, "noskewadj")) {
+    params->noskewadj = 1;
+  } else if (!strcmp(option, "nullok")) {
+    params->nullok = NULLOK;
+  } else if (!strcmp(option, "echo-verification-code") ||
+             !strcmp(option, "echo_verification_code")) {
+    params->echocode = PAM_PROMPT_ECHO_ON;
+  } else if ( !strcmp(option, "use_helper") || !memcmp(option, "use_helper=", 11)) {
+    char *helper_path;
+    params->use_helper = 1;
+    if (!memcmp(option, "use_helper=", 11)) {
+      helper_path = strdup(option+11);
+      if ( access(helper_path, F_OK) < 0 ){
+        log_message(LOG_ERR, NULL, "failed to find \"%s\": %s", helper_path, strerror (errno));
+        helper_path = CHKTOKEN_HELPER;
+      }
+    } else {
+      helper_path = CHKTOKEN_HELPER;
+    }
+    params->helper_path = helper_path;
+  } else if (cfg_file && (
+    !memcmp(option, "helper_owner=", 13) ||
+    !strcmp(option, "counter-based") ||
+    !strcmp(option, "time-based") ||
+    !strcmp(option, "disallow-reuse") ||
+    !strcmp(option, "allow-reuse") ||
+    !strcmp(option, "force") ||
+    !memcmp(option, "label=", 6) ||
+    !strcmp(option, "quiet") ||
+    !memcmp(option, "qr-mode=", 8) ||
+    !memcmp(option, "rate-limit=", 11) ||
+    !memcmp(option, "rate-time=", 10) ||
+    !strcmp(option, "no-rate-limit") ||
+    !memcmp(option, "window-size=", 12) ||
+    !strcmp(option, "minimal-window"))) {
+    // do nothing: these are options for google-authenticator utility
+  } else {
+    log_message(LOG_ERR, pamh, "Unrecognized option \"%s\"", option);
+    return -1;
+  }
+  return 0;
+}
+
+static int parse_config_file(pam_handle_t *pamh, Params *params) {
+  char input[MAXLINELENGTH];
+  FILE *cf;
+  int len;
+
+  if ((cf = fopen(CONFIG_FILE, "r")) == NULL){
+    log_message(LOG_ERR, NULL, "failed to find \"%s\": %s", CONFIG_FILE, strerror (errno));
+    return -1;
+  }
+
+  while (fgets(input, MAXLINELENGTH, cf)){
+    if (input[0] == '#')
+      continue;
+    len = strlen(input);
+    if (len < 2)
+      continue;
+    if (input[len-1] == '\n')
+      input[len-1] = '\0';
+
+    if( parse_option(pamh, params, input, 1) < 0 ){
+      return -1;
+    }
+  }
+  return 0;
+}
+
 static int parse_args(pam_handle_t *pamh, int argc, const char **argv,
                       Params *params) {
   params->echocode = PAM_PROMPT_ECHO_OFF;
   for (int i = 0; i < argc; ++i) {
-    if (!memcmp(argv[i], "secret=", 7)) {
-      free((void *)params->secret_filename_spec);
-      params->secret_filename_spec = argv[i] + 7;
-    } else if (!memcmp(argv[i], "user=", 5)) {
-      uid_t uid;
-      if (parse_user(pamh, argv[i] + 5, &uid) < 0) {
-        return -1;
-      }
-      params->fixed_uid = 1;
-      params->uid = uid;
-    } else if (!strcmp(argv[i], "try_first_pass")) {
-      params->pass_mode = TRY_FIRST_PASS;
-    } else if (!strcmp(argv[i], "use_first_pass")) {
-      params->pass_mode = USE_FIRST_PASS;
-    } else if (!strcmp(argv[i], "forward_pass")) {
-      params->forward_pass = 1;
-    } else if (!strcmp(argv[i], "noskewadj")) {
-      params->noskewadj = 1;
-    } else if (!strcmp(argv[i], "nullok")) {
-      params->nullok = NULLOK;
-    } else if (!strcmp(argv[i], "echo-verification-code") ||
-               !strcmp(argv[i], "echo_verification_code")) {
-      params->echocode = PAM_PROMPT_ECHO_ON;
-    } else if ( !strcmp(argv[i], "use_helper") || !memcmp(argv[i], "use_helper=", 11)) {
-      char *helper_path;
-      params->use_helper = 1;
-      if (!memcmp(argv[i], "use_helper=", 11)) {
-        helper_path = strdup(argv[i]+11);
-        if ( access(helper_path, F_OK) < 0 ){
-          log_message(LOG_ERR, NULL, "failed to find \"%s\": %s", helper_path, strerror (errno));
-          helper_path = CHKTOKEN_HELPER;
-        }
-      } else {
-        helper_path = CHKTOKEN_HELPER;
-      }
-      params->helper_path = helper_path;
-    } else {
-      log_message(LOG_ERR, pamh, "Unrecognized option \"%s\"", argv[i]);
+    if( parse_option(pamh, params, argv[i], 0) < 0 ){
       return -1;
     }
   }
@@ -899,6 +947,13 @@ static int google_authenticator(pam_handle_t *pamh, int flags,
 
   // Handle optional arguments that configure our PAM module
   Params params = { 0 };
+
+#if !defined(TESTING)
+  if (parse_config_file(pamh, &params) < 0){
+    return rc;
+  }
+#endif
+
   if (parse_args(pamh, argc, argv, &params) < 0) {
     return rc;
   }

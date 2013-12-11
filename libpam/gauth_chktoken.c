@@ -118,10 +118,7 @@ static int parse_args(const int argc, const char **argv,
 
   // param 1: secret_filename
   *secret_filename = strdup(argv[1]);
-  if ( access(*secret_filename, F_OK) < 0 ){
-    log_message(LOG_ERR, NULL, "failed to find \"%s\": %s", *secret_filename, strerror (errno));
-    return -1;
-  }
+
   // param 2: nullok
   if (strcmp(argv[2], "nullok") == 0) {
     params->nullok = NULLOK;
