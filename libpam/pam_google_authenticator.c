@@ -313,6 +313,24 @@ static int drop_privileges(pam_handle_t *pamh, const char *username, int uid,
   return 0;
 }
 
+static int check_secret_file_exists(pam_handle_t *pamh,
+                                    struct Params *params,
+                                    const char *secret_filename) {
+  struct stat sb;
+  if ( stat(secret_filename, &sb) < 0 ){
+    if (params->nullok != NULLERR && errno == ENOENT) {
+      // The user doesn't have a state file, but the admininistrator said
+      // that this is OK. We still return an error from open_secret_file(),
+      // but we remember that this was the result of a missing state file.
+      params->nullok = SECRETNOTFOUND;
+    } else {
+      log_message(LOG_ERR, pamh, "Failed to read \"%s\"", secret_filename);
+    }
+    return -1;
+  }
+  return 0;
+}
+
 static int open_secret_file(pam_handle_t *pamh, const char *secret_filename,
                             struct Params *params, const char *username,
                             int uid, off_t *size, time_t *mtime) {
@@ -338,7 +356,7 @@ static int open_secret_file(pam_handle_t *pamh, const char *secret_filename,
     return -1;
   }
 
-  // Check permissions on "~/.google_authenticator"
+  // Check permissions on secret file
   if ((sb.st_mode & 03577) != 0400 ||
       !S_ISREG(sb.st_mode) ||
       sb.st_uid != (uid_t)uid) {
@@ -683,6 +701,13 @@ static int auth_helper(pam_handle_t *pamh,
   int rc = PAM_SESSION_ERR;
   char *forwarded_pw = NULL;
   char *pw = NULL;
+
+  if (check_secret_file_exists(pamh, params, secret_filename) < 0) {
+    if (params->nullok == SECRETNOTFOUND) {
+      rc = PAM_SUCCESS;
+    }
+    return rc;
+  }
 
   if (params->pass_mode == USE_FIRST_PASS ||
       params->pass_mode == TRY_FIRST_PASS) {
