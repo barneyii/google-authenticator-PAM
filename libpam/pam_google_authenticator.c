@@ -466,9 +466,10 @@ static int parse_option(pam_handle_t *pamh, Params *params,
     params->use_helper = 1;
     if (!memcmp(option, "use_helper=", 11)) {
       helper_path = strdup(option+11);
-      if ( access(helper_path, F_OK) < 0 ){
+      struct stat sb;
+      if ( stat(helper_path, &sb) < 0 ){
         log_message(LOG_ERR, NULL, "failed to find \"%s\": %s", helper_path, strerror (errno));
-        helper_path = CHKTOKEN_HELPER;
+        return -1;
       }
     } else {
       helper_path = CHKTOKEN_HELPER;
