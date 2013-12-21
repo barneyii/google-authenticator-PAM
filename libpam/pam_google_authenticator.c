@@ -621,16 +621,10 @@ static int run_helper_binary(pam_handle_t *pamh,
     args[0] = strdup(params->helper_path);
     args[1] = strdup(secret_filename);
 
-    if (params->nullok) {
-      args[2]=strdup("nullok");
-    } else {
-      args[2]=strdup("nonull");
-    }
-
     if (params->forward_pass) {
-      args[3]=strdup("forward_pass");
+      args[2]=strdup("forward_pass");
     } else {
-      args[3]=strdup("no_forward_pass");
+      args[2]=strdup("no_forward_pass");
     }
 
     execve(params->helper_path, args, envp);
@@ -723,7 +717,9 @@ static int auth_helper(pam_handle_t *pamh,
     rc = run_helper_binary(pamh, params, secret_filename, pw, &forwarded_pw);
   }
 
-  log_message(LOG_INFO, pamh, "helper returned forwarded_pw: %s", forwarded_pw);
+  if (params->forward_pass){
+    log_message(LOG_INFO, pamh, "helper returned forwarded_pw: %s", forwarded_pw);
+  }
 
   // Update the system password, if we were asked to forward
   // the system password. We already removed the verification
