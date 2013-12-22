@@ -137,7 +137,7 @@ static int check_pw(const char *secret_filename,
       (secret = get_shared_secret(pamh, secret_filename, buf, &secretLen)) &&
        rate_limit(pamh, secret_filename, &early_updated, &buf) >= 0 &&
       (hotp_counter = get_hotp_counter(pamh, buf)) >= 0 ) {
-
+    rc = PAM_AUTH_ERR;
     for (int mode = 0; mode < 2; ++mode) {
       // we don't know whether the code is a 6-digit verification code or an 8-digit scratch code
       // so try both, starting with verification code
@@ -183,15 +183,16 @@ static int check_pw(const char *secret_filename,
 
       // Check all possible types of verification codes.
       switch (check_code(pamh, secret_filename, &updated,
-                         &buf, secret, secretLen, code,
-                         params, hotp_counter,
-                         &must_advance_counter)){
+                              &buf, secret, secretLen, code,
+                              params, hotp_counter,
+                              &must_advance_counter)){
       case 0:
         rc = PAM_SUCCESS;
         break;
-      case 1:
+      case 1: // wrong code
         goto invalid;
-      default:
+      default: // error
+        rc = PAM_SESSION_ERR;
         break;
       }
 
@@ -221,8 +222,8 @@ static int check_pw(const char *secret_filename,
 
     // If nothing matched, display an error message
     if (rc != PAM_SUCCESS) {
-      log_message(LOG_ERR, pamh, "Invalid verification code");
-    } else log_message(LOG_INFO, pamh, "accepted!!!");
+      log_message(LOG_ERR, pamh, "Authentication failed. err=%d", rc);
+    }
   }
 
   // Persist the new state.

@@ -701,11 +701,19 @@ static int auth_helper(pam_handle_t *pamh,
     rc = run_helper_binary(pamh, params, secret_filename, pw, &forwarded_pw);
   }
   if (params->pass_mode == PROMPT ||
-      (rc != PAM_SUCCESS && params->pass_mode == TRY_FIRST_PASS) ) {
-    pw = request_pass(pamh, params->echocode,
-                            params->forward_pass ?
-                            "Password & verification code: " :
-                            "Verification code: ");
+      (rc == PAM_AUTH_ERR && params->pass_mode == TRY_FIRST_PASS) ) {
+    if (pw){ // clear pw from get_first_pass
+      memset(pw, 0, strlen(pw));
+      free(pw);
+      pw = NULL;
+    }
+    // try again if request_pass fails because this is the non-helper behavior
+    for(int i = 0; i < 2 & !pw; i++){
+      pw = request_pass(pamh, params->echocode,
+                              params->forward_pass ?
+                              "Password & verification code: " :
+                              "Verification code: ");
+    }
     rc = run_helper_binary(pamh, params, secret_filename, pw, &forwarded_pw);
 
     if (!params->forward_pass) {
@@ -720,6 +728,10 @@ static int auth_helper(pam_handle_t *pamh,
   }
 
   log_message(LOG_INFO, pamh, "helper returned forwarded_pw: %s", forwarded_pw);
+
+  // only use the PAM_SESSION_ERR message to mirror non-helper behavior
+  if (rc != PAM_SUCCESS)
+    rc = PAM_SESSION_ERR;
 
   // Update the system password, if we were asked to forward
   // the system password. We already removed the verification
