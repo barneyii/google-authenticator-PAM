@@ -621,12 +621,6 @@ static int run_helper_binary(pam_handle_t *pamh,
     args[0] = strdup(params->helper_path);
     args[1] = strdup(secret_filename);
 
-    if (params->forward_pass) {
-      args[2]=strdup("forward_pass");
-    } else {
-      args[2]=strdup("no_forward_pass");
-    }
-
     execve(params->helper_path, args, envp);
 
     /* should not get here: exit with error */
@@ -651,9 +645,7 @@ static int run_helper_binary(pam_handle_t *pamh,
     }
 
     /* read forwarded_pw from child */
-    if (params->forward_pass){
-      read_forwarded_pw(forwarded_pw);
-    }
+    read_forwarded_pw(forwarded_pw);
 
     // close pipe fds
     close(p2c[0]); /* close here to avoid possible SIGPIPE above if helper fails */
@@ -715,17 +707,25 @@ static int auth_helper(pam_handle_t *pamh,
                             "Password & verification code: " :
                             "Verification code: ");
     rc = run_helper_binary(pamh, params, secret_filename, pw, &forwarded_pw);
+
+    if (!params->forward_pass) {
+      // We are explicitly configured so that we don't try to share
+      // the password with any other stacked PAM module. We must
+      // therefore verify that the user entered just the verification
+      // code, but no password.
+      if (*forwarded_pw) {
+        rc = PAM_SESSION_ERR;
+      }
+    }
   }
 
-  if (params->forward_pass){
-    log_message(LOG_INFO, pamh, "helper returned forwarded_pw: %s", forwarded_pw);
-  }
+  log_message(LOG_INFO, pamh, "helper returned forwarded_pw: %s", forwarded_pw);
 
   // Update the system password, if we were asked to forward
   // the system password. We already removed the verification
   // code from the end of the password.
   if (rc == PAM_SUCCESS && params->forward_pass) {
-    if (!forwarded_pw || pam_set_item(pamh, PAM_AUTHTOK, forwarded_pw) != PAM_SUCCESS) {
+    if (!*forwarded_pw || pam_set_item(pamh, PAM_AUTHTOK, forwarded_pw) != PAM_SUCCESS) {
       rc = PAM_SESSION_ERR;
     }
   }

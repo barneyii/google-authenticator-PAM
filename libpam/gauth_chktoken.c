@@ -55,16 +55,8 @@ static int open_secret_file(const char *secret_filename,
   *mtime = 0;
   int fd = open(secret_filename, O_RDONLY);
   struct stat sb;
-  if (fd < 0 ||
-      fstat(fd, &sb) < 0) {
-    if (params->nullok != NULLERR && errno == ENOENT) {
-      // The user doesn't have a state file, but the admininistrator said
-      // that this is OK. We still return an error from open_secret_file(),
-      // but we remember that this was the result of a missing state file.
-      params->nullok = SECRETNOTFOUND;
-    } else {
-      log_message(LOG_ERR, NULL, "Failed to read \"%s\": %s", secret_filename, strerror(errno));
-    }
+  if (fd < 0 || fstat(fd, &sb) < 0) {
+    log_message(LOG_ERR, NULL, "Failed to read \"%s\": %s", secret_filename, strerror(errno));
  error:
     if (fd >= 0) {
       close(fd);
@@ -118,25 +110,6 @@ static int parse_args(const int argc, const char **argv,
 
   // param 1: secret_filename
   *secret_filename = strdup(argv[1]);
-
-  // param 2: nullok
-  if (strcmp(argv[2], "nullok") == 0) {
-    params->nullok = NULLOK;
-  } else if (strcmp(argv[2], "nonull") == 0) {
-    params->nullok = NULLERR;
-  } else {
-    log_message(LOG_ERR, NULL, "Invalid value for nullok option: \"%s\". Must be either 'nullok' or 'nonull'", argv[2]);
-    return -1;
-  }
-  // param 3: forward_pass
-  if (strcmp(argv[3], "forward_pass") == 0) {
-    params->forward_pass = 1;
-  } else if (strcmp(argv[3], "no_forward_pass") == 0) {
-    params->forward_pass = 0;
-  } else {
-    log_message(LOG_ERR, NULL, "Invalid value for forward_pass option: \"%s\". Must be either 'forward_pass' or 'no_forward_pass'", argv[3]);
-    return -1;
-  }
 
   return 0;
 }
@@ -208,16 +181,6 @@ static int check_pw(const char *secret_filename,
       int code = (int)l;
       memset(pw + pw_len - expected_len, 0, expected_len);
 
-      if (!params->forward_pass) {
-        // We are explicitly configured so that we don't try to share
-        // the password with any other stacked PAM module. We must
-        // therefore verify that the user entered just the verification
-        // code, but no password.
-        if (*pw) {
-          goto invalid;
-        }
-      }
-
       // Check all possible types of verification codes.
       switch (check_code(pamh, secret_filename, &updated,
                          &buf, secret, secretLen, code,
@@ -235,18 +198,12 @@ static int check_pw(const char *secret_filename,
       break;
     } // end loop
 
-    // Update forwarded_pw if we were asked to.
-    // We already removed the verification code from the end of the password.
-    if (rc == PAM_SUCCESS && params->forward_pass) {
-      if (pw) {
-        *forwarded_pw = strdup(pw);
-      } else {
-        rc = PAM_SESSION_ERR;
-      }
-    }
-
-    // Clear out password and deallocate memory
     if (pw) {
+      // Update forwarded_pw
+      // We already removed the verification code from the end of the password.
+      *forwarded_pw = strdup(pw);
+
+      // Clear out password and deallocate memory
       memset(pw, 0, strlen(pw));
       free(pw);
     }
@@ -265,15 +222,7 @@ static int check_pw(const char *secret_filename,
     // If nothing matched, display an error message
     if (rc != PAM_SUCCESS) {
       log_message(LOG_ERR, pamh, "Invalid verification code");
-    }
-  }
-
-
-  // If the user has not created a state file with a shared secret, and if
-  // the administrator set the "nullok" option, this PAM module completes
-  // successfully, without ever prompting the user.
-  if (params->nullok == SECRETNOTFOUND) {
-    rc = PAM_SUCCESS;
+    } else log_message(LOG_INFO, pamh, "accepted!!!");
   }
 
   // Persist the new state.
