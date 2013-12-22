@@ -1,6 +1,7 @@
 *.o
 libpam/google-authenticator
 libpam/gauth_chktoken
+libpam/gauth_chktoken_testing
 libpam/pam_google_authenticator.so
 libpam/pam_google_authenticator_testing.so
 libpam/pam_google_authenticator_unittest

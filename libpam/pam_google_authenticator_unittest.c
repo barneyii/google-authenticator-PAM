@@ -32,6 +32,8 @@
 #include "base32.h"
 #include "hmac.h"
 
+#define HELPER_PATH "gauth_chktoken_testing"
+
 #if !defined(PAM_BAD_ITEM)
 // FreeBSD does not know about PAM_BAD_ITEM. And PAM_SYMBOL_ERR is an "enum",
 // we can't test for it at compile-time.
@@ -39,7 +41,9 @@
 #endif
 
 static const char pw[] = "0123456789";
+static const char default_response[] = "050548";
 static char *response = "";
+char state_file_buf[4096] = { 0 };
 static void *pam_module;
 static enum { TWO_PROMPTS, COMBINED_PASSWORD, COMBINED_PROMPT } conv_mode;
 static int num_prompts_shown = 0;
@@ -48,6 +52,7 @@ static int conversation(int num_msg, const struct pam_message **msg,
                         struct pam_response **resp, void *appdata_ptr) {
   // Keep track of how often the conversation callback is executed.
   ++num_prompts_shown;
+
   if (conv_mode == COMBINED_PASSWORD) {
     return PAM_CONV_ERR;
   }
@@ -146,7 +151,7 @@ int main(int argc, char *argv[]) {
   uint8_t enc[((sizeof(dat) + 4)/5)*8 + 1];
   assert(base32_encode(dat, sizeof(dat), enc, sizeof(enc)) == sizeof(enc)-1);
   assert(!strcmp((char *)enc, "JBSWY3DPEB3W64TMMQXC4LQA"));
- 
+
   puts("Testing base32 decoding");
   uint8_t dec[sizeof(dat)];
   assert(base32_decode(enc, dec, sizeof(dec)) == sizeof(dec));
@@ -219,354 +224,416 @@ int main(int argc, char *argv[]) {
       (int (*)(uint8_t*, int, unsigned long))dlsym(pam_module, "compute_code");
   assert(compute_code);
 
-  for (int otp_mode = 0; otp_mode < 8; ++otp_mode) {
-    // Create a secret file with a well-known test vector
-    char fn[] = "/tmp/.google_authenticator_XXXXXX";
-    int fd = mkstemp(fn);
-    assert(fd >= 0);
-    static const uint8_t secret[] = "2SH3V3GDW7ZNMGYE";
-    assert(write(fd, secret, sizeof(secret)-1) == sizeof(secret)-1);
-    assert(write(fd, "\n\" TOTP_AUTH", 12) == 12);
-    close(fd);
-    uint8_t binary_secret[sizeof(secret)];
-    size_t binary_secret_len = base32_decode(secret, binary_secret,
-                                             sizeof(binary_secret));
-  
-    // Set up test argc/argv parameters to let the PAM module know where to
-    // find our secret file
-    const char *targv[] = { malloc(strlen(fn) + 8), NULL, NULL, NULL, NULL };
-    strcat(strcpy((char *)targv[0], "secret="), fn);
-    int targc;
-    int expected_good_prompts_shown;
-    int expected_bad_prompts_shown;
-  
-    switch (otp_mode) {
-    case 0:
-      puts("\nRunning tests, querying for verification code");
-      conv_mode = TWO_PROMPTS;
-      targc = 1;
-      expected_good_prompts_shown = expected_bad_prompts_shown = 1;
-      break;
-    case 1:
-      puts("\nRunning tests, querying for verification code, "
-           "forwarding system pass");
-      conv_mode = COMBINED_PROMPT;
-      targv[1] = strdup("forward_pass");
-      targc = 2;
-      expected_good_prompts_shown = expected_bad_prompts_shown = 1;
-      break;
-    case 2:
-      puts("\nRunning tests with use_first_pass");
-      conv_mode = COMBINED_PASSWORD;
-      targv[1] = strdup("use_first_pass");
-      targc = 2;
-      expected_good_prompts_shown = expected_bad_prompts_shown = 0;
-      break;
-    case 3:
-      puts("\nRunning tests with use_first_pass, forwarding system pass");
-      conv_mode = COMBINED_PASSWORD;
-      targv[1] = strdup("use_first_pass");
-      targv[2] = strdup("forward_pass");
-      targc = 3;
-      expected_good_prompts_shown = expected_bad_prompts_shown = 0;
-      break;
-    case 4:
-      puts("\nRunning tests with try_first_pass, combining codes");
-      conv_mode = COMBINED_PASSWORD;
-      targv[1] = strdup("try_first_pass");
-      targc = 2;
-      expected_good_prompts_shown = 0;
-      expected_bad_prompts_shown = 2;
-      break;
-    case 5:
-      puts("\nRunning tests with try_first_pass, combining codes, "
-           "forwarding system pass");
-      conv_mode = COMBINED_PASSWORD;
-      targv[1] = strdup("try_first_pass");
-      targv[2] = strdup("forward_pass");
-      targc = 3;
-      expected_good_prompts_shown = 0;
-      expected_bad_prompts_shown = 2;
-      break;
-    case 6:
-      puts("\nRunning tests with try_first_pass, querying for codes");
-      conv_mode = TWO_PROMPTS;
-      targv[1] = strdup("try_first_pass");
-      targc = 2;
-      expected_good_prompts_shown = expected_bad_prompts_shown = 1;
-      break;
-    default:
-      assert(otp_mode == 7);
-      puts("\nRunning tests with try_first_pass, querying for codes, "
-           "forwarding system pass");
-      conv_mode = COMBINED_PROMPT;
-      targv[1] = strdup("try_first_pass");
-      targv[2] = strdup("forward_pass");
-      targc = 3;
-      expected_good_prompts_shown = expected_bad_prompts_shown = 1;
-      break;
-    }
-
-    // Make sure num_prompts_shown is still 0.
-    verify_prompts_shown(0);
-
-    // Set the timestamp that this test vector needs
-    set_time(10000*30);
-  
-    response = "123456";
-
-    // Check if we can log in when using an invalid verification code
-    puts("Testing failed login attempt");
-    assert(pam_sm_open_session(NULL, 0, targc, targv) == PAM_SESSION_ERR);
-    verify_prompts_shown(expected_bad_prompts_shown);
-  
-    // Check required number of digits
-    if (conv_mode == TWO_PROMPTS) {
-      puts("Testing required number of digits");
-      response = "50548";
-      assert(pam_sm_open_session(NULL, 0, targc, targv) == PAM_SESSION_ERR);
-      verify_prompts_shown(expected_bad_prompts_shown);
-      response = "0050548";
-      assert(pam_sm_open_session(NULL, 0, targc, targv) == PAM_SESSION_ERR);
-      verify_prompts_shown(expected_bad_prompts_shown);
-      response = "00050548";
-      assert(pam_sm_open_session(NULL, 0, targc, targv) == PAM_SESSION_ERR);
-      verify_prompts_shown(expected_bad_prompts_shown);
-    }
-
-    // Test a blank response
-    puts("Testing a blank response");
-    response = "";
-    assert(pam_sm_open_session(NULL, 0, targc, targv) == PAM_SESSION_ERR);
-    verify_prompts_shown(expected_bad_prompts_shown);
-
-    // Set the response that we should send back to the authentication module
-    response = "050548";
-
-    // Test handling of missing state files
-    puts("Test handling of missing state files");
-    const char *old_secret = targv[0];
-    targv[0] = "secret=/NOSUCHFILE";
-    assert(pam_sm_open_session(NULL, 0, targc, targv) == PAM_SESSION_ERR);
-    verify_prompts_shown(0);
-    targv[targc++] = "nullok";
-    targv[targc] = NULL;
-    assert(pam_sm_open_session(NULL, 0, targc, targv) == PAM_SUCCESS);
-    verify_prompts_shown(0);
-    targv[--targc] = NULL;
-    targv[0] = old_secret;
-  
-    // Check if we can log in when using a valid verification code
-    puts("Testing successful login");
-    assert(pam_sm_open_session(NULL, 0, targc, targv) == PAM_SUCCESS);
-    verify_prompts_shown(expected_good_prompts_shown);
-  
-    // Test the WINDOW_SIZE option
-    puts("Testing WINDOW_SIZE option");
-    for (int *tm  = (int []){ 9998, 9999, 10001, 10002, 10000, -1 },
-             *res = (int []){ PAM_SESSION_ERR, PAM_SUCCESS, PAM_SUCCESS,
-                              PAM_SESSION_ERR, PAM_SUCCESS };
-         *tm >= 0;) {
-      set_time(*tm++ * 30);
-      assert(pam_sm_open_session(NULL, 0, targc, targv) == *res++);
-      verify_prompts_shown(expected_good_prompts_shown);
-    }
-    assert(!chmod(fn, 0600));
-    assert((fd = open(fn, O_APPEND | O_WRONLY)) >= 0);
-    assert(write(fd, "\n\" WINDOW_SIZE 6\n", 17) == 17);
-    close(fd);
-    for (int *tm  = (int []){ 9996, 9997, 10002, 10003, 10000, -1 },
-             *res = (int []){ PAM_SESSION_ERR, PAM_SUCCESS, PAM_SUCCESS,
-                              PAM_SESSION_ERR, PAM_SUCCESS };
-         *tm >= 0;) {
-      set_time(*tm++ * 30);
-      assert(pam_sm_open_session(NULL, 0, targc, targv) == *res++);
-      verify_prompts_shown(expected_good_prompts_shown);
-    }
-  
-    // Test the DISALLOW_REUSE option
-    puts("Testing DISALLOW_REUSE option");
-    assert(pam_sm_open_session(NULL, 0, targc, targv) == PAM_SUCCESS);
-    verify_prompts_shown(expected_good_prompts_shown);
-    assert(!chmod(fn, 0600));
-    assert((fd = open(fn, O_APPEND | O_WRONLY)) >= 0);
-    assert(write(fd, "\" DISALLOW_REUSE\n", 17) == 17);
-    close(fd);
-    assert(pam_sm_open_session(NULL, 0, targc, targv) == PAM_SUCCESS);
-    verify_prompts_shown(expected_good_prompts_shown);
-    assert(pam_sm_open_session(NULL, 0, targc, targv) == PAM_SESSION_ERR);
-    verify_prompts_shown(expected_good_prompts_shown);
-  
-    // Test that DISALLOW_REUSE expires old entries from the re-use list
-    char *old_response = response;
-    for (int i = 10001; i < 10008; ++i) {
-      set_time(i * 30);
-      char buf[7];
-      response = buf;
-      sprintf(response, "%06d", compute_code(binary_secret,
-                                             binary_secret_len, i));
-      assert(pam_sm_open_session(NULL, 0, targc, targv) == PAM_SUCCESS);
-      verify_prompts_shown(expected_good_prompts_shown);
-    }
-    set_time(10000 * 30);
-    response = old_response;
-    assert((fd = open(fn, O_RDONLY)) >= 0);
-    char state_file_buf[4096] = { 0 };
-    assert(read(fd, state_file_buf, sizeof(state_file_buf)-1) > 0);
-    close(fd);
-    const char *disallow = strstr(state_file_buf, "\" DISALLOW_REUSE ");
-    assert(disallow);
-    assert(!memcmp(disallow + 17,
-                   "10002 10003 10004 10005 10006 10007\n", 36));
-  
-    // Test the RATE_LIMIT option
-    puts("Testing RATE_LIMIT option");
-    assert(!chmod(fn, 0600));
-    assert((fd = open(fn, O_APPEND | O_WRONLY)) >= 0);
-    assert(write(fd, "\" RATE_LIMIT 4 120\n", 19) == 19);
-    close(fd);
-    for (int *tm  = (int []){ 20000, 20001, 20002, 20003, 20004, 20006, -1 },
-             *res = (int []){ PAM_SUCCESS, PAM_SUCCESS, PAM_SUCCESS,
-                              PAM_SUCCESS, PAM_SESSION_ERR, PAM_SUCCESS, -1 };
-         *tm >= 0;) {
-      set_time(*tm * 30);
-      char buf[7];
-      response = buf;
-      sprintf(response, "%06d",
-              compute_code(binary_secret, binary_secret_len, *tm++));
-      assert(pam_sm_open_session(NULL, 0, targc, targv) == *res);
-      verify_prompts_shown(
-          *res != PAM_SUCCESS ? 0 : expected_good_prompts_shown);
-      ++res;
-    }
-    set_time(10000 * 30);
-    response = old_response;
-    assert(!chmod(fn, 0600));
-    assert((fd = open(fn, O_RDWR)) >= 0);
-    memset(state_file_buf, 0, sizeof(state_file_buf));
-    assert(read(fd, state_file_buf, sizeof(state_file_buf)-1) > 0);
-    const char *rate_limit = strstr(state_file_buf, "\" RATE_LIMIT ");
-    assert(rate_limit);
-    assert(!memcmp(rate_limit + 13,
-                   "4 120 600060 600090 600120 600180\n", 35));
-    
-    // Test trailing space in RATE_LIMIT. This is considered a file format
-    // error.
-    char *eol = strchr(rate_limit, '\n');
-    *eol = ' ';
-    assert(!lseek(fd, 0, SEEK_SET));
-    assert(write(fd, state_file_buf, strlen(state_file_buf)) ==
-           strlen(state_file_buf));
-    close(fd);
-    assert(pam_sm_open_session(NULL, 0, targc, targv) == PAM_SESSION_ERR);
-    verify_prompts_shown(0);
-    assert(!strncmp(get_error_msg(),
-                    "Invalid list of timestamps in RATE_LIMIT", 40));
-    *eol = '\n';
-    assert(!chmod(fn, 0600));
-    assert((fd = open(fn, O_WRONLY)) >= 0);
-    assert(write(fd, state_file_buf, strlen(state_file_buf)) ==
-           strlen(state_file_buf));
-    close(fd);
-  
-    // Test TIME_SKEW option
-    puts("Testing TIME_SKEW");
-    for (int i = 0; i < 4; ++i) {
-      set_time((12000 + i)*30);
-      char buf[7];
-      response = buf;
-      sprintf(response, "%06d",
-              compute_code(binary_secret, binary_secret_len, 11000 + i));
-      assert(pam_sm_open_session(NULL, 0, targc, targv) ==
-             (i >= 2 ? PAM_SUCCESS : PAM_SESSION_ERR));
-      verify_prompts_shown(expected_good_prompts_shown);
-    }
-    set_time(12010 * 30);
-    char buf[7];
+  char *compute_code_s(uint8_t *secret, int secretLen, unsigned long value){
+    char *buf = malloc(7);
     response = buf;
-    sprintf(response, "%06d", compute_code(binary_secret,
-                                           binary_secret_len, 11010));
-    assert(pam_sm_open_session(NULL, 0, 1,
-                               (const char *[]){ "noskewadj", 0 }) ==
-           PAM_SESSION_ERR);
-    verify_prompts_shown(0);
-    set_time(10000*30);
-    
-    // Test scratch codes
-    puts("Testing scratch codes");
-    response = "12345678";
-    assert(pam_sm_open_session(NULL, 0, targc, targv) == PAM_SESSION_ERR);
-    verify_prompts_shown(expected_bad_prompts_shown);
-    assert(!chmod(fn, 0600));
-    assert((fd = open(fn, O_APPEND | O_WRONLY)) >= 0);
-    assert(write(fd, "12345678\n", 9) == 9);
-    close(fd);
-    assert(pam_sm_open_session(NULL, 0, targc, targv) == PAM_SUCCESS);
-    verify_prompts_shown(expected_good_prompts_shown);
-    assert(pam_sm_open_session(NULL, 0, targc, targv) == PAM_SESSION_ERR);
-    verify_prompts_shown(expected_bad_prompts_shown);
-  
-    // Set up secret file for counter-based codes.
-    assert(!chmod(fn, 0600));
-    assert((fd = open(fn, O_TRUNC | O_WRONLY)) >= 0);
-    assert(write(fd, secret, sizeof(secret)-1) == sizeof(secret)-1);
-    assert(write(fd, "\n\" HOTP_COUNTER 1\n", 18) == 18);
-    close(fd);
-  
-    response = "293240";
-  
-    // Check if we can log in when using a valid verification code
-    puts("Testing successful counter-based login");
-    assert(pam_sm_open_session(NULL, 0, targc, targv) == PAM_SUCCESS);
-    verify_prompts_shown(expected_good_prompts_shown);
-  
-    // Verify that the hotp counter incremented
-    assert((fd = open(fn, O_RDONLY)) >= 0);
-    memset(state_file_buf, 0, sizeof(state_file_buf));
-    assert(read(fd, state_file_buf, sizeof(state_file_buf)-1) > 0);
-    close(fd);
-    const char *hotp_counter = strstr(state_file_buf, "\" HOTP_COUNTER ");
-    assert(hotp_counter);
-    assert(!memcmp(hotp_counter + 15, "2\n", 2));
-  
-    // Check if we can log in when using an invalid verification code
-    // (including the same code a second time)
-    puts("Testing failed counter-based login attempt");
-    assert(pam_sm_open_session(NULL, 0, targc, targv) == PAM_SESSION_ERR);
-    verify_prompts_shown(expected_bad_prompts_shown);
-  
-    // Verify that the hotp counter incremented
-    assert((fd = open(fn, O_RDONLY)) >= 0);
-    memset(state_file_buf, 0, sizeof(state_file_buf));
-    assert(read(fd, state_file_buf, sizeof(state_file_buf)-1) > 0);
-    close(fd);
-    hotp_counter = strstr(state_file_buf, "\" HOTP_COUNTER ");
-    assert(hotp_counter);
-    assert(!memcmp(hotp_counter + 15, "3\n", 2));
-  
-    response = "932068";
-  
-    // Check if we can log in using a future valid verification code (using
-    // default window_size of 3)
-    puts("Testing successful future counter-based login");
-    assert(pam_sm_open_session(NULL, 0, targc, targv) == PAM_SUCCESS);
-    verify_prompts_shown(expected_good_prompts_shown);
-  
-    // Verify that the hotp counter incremented
-    assert((fd = open(fn, O_RDONLY)) >= 0);
-    memset(state_file_buf, 0, sizeof(state_file_buf));
-    assert(read(fd, state_file_buf, sizeof(state_file_buf)-1) > 0);
-    close(fd);
-    hotp_counter = strstr(state_file_buf, "\" HOTP_COUNTER ");
-    assert(hotp_counter);
-    assert(!memcmp(hotp_counter + 15, "6\n", 2));
-  
-    // Remove the temporarily created secret file
-    unlink(fn);
+    sprintf(response, "%06d", compute_code(secret, secretLen, value));
+    return response;
+  }
 
-    // Release memory for the test arguments
-    for (int i = 0; i < targc; ++i) {
-      free((void *)targv[i]);
+  for (int use_helper = 0; use_helper <= 1; use_helper++){
+    if (use_helper) puts("\n--- Running test suite with use_helper ---");
+    for (int otp_mode = 0; otp_mode < 8; ++otp_mode) {
+      // Create a secret file with a well-known test vector
+      char fn[] = "/tmp/.google_authenticator_XXXXXX";
+      int fd = mkstemp(fn);
+      assert(fd >= 0);
+      static const uint8_t secret[] = "2SH3V3GDW7ZNMGYE";
+      assert(write(fd, secret, sizeof(secret)-1) == sizeof(secret)-1);
+      assert(write(fd, "\n\" TOTP_AUTH", 12) == 12);
+      close(fd);
+      uint8_t binary_secret[sizeof(secret)];
+      size_t binary_secret_len = base32_decode(secret, binary_secret,
+                                               sizeof(binary_secret));
+
+      // Set up test argc/argv parameters to let the PAM module know where to
+      // find our secret file
+      const char *targv[] = { malloc(strlen(fn) + 8), NULL, NULL, NULL, NULL };
+      strcat(strcpy((char *)targv[0], "secret="), fn);
+      int targc;
+      int expected_good_prompts_shown;
+      int expected_bad_prompts_shown;
+      int helper_used_twice = 0;
+
+      switch (otp_mode) {
+      case 0:
+        puts("\n0. Running tests, querying for verification code");
+        conv_mode = TWO_PROMPTS;
+        targc = 1;
+        expected_good_prompts_shown = expected_bad_prompts_shown = 1;
+        break;
+      case 1:
+        puts("\n1. Running tests, querying for verification code, "
+             "forwarding system pass");
+        conv_mode = COMBINED_PROMPT;
+        targv[1] = strdup("forward_pass");
+        targc = 2;
+        expected_good_prompts_shown = expected_bad_prompts_shown = 1;
+        break;
+      case 2:
+        puts("\n2. Running tests with use_first_pass");
+        conv_mode = COMBINED_PASSWORD;
+        targv[1] = strdup("use_first_pass");
+        targc = 2;
+        expected_good_prompts_shown = expected_bad_prompts_shown = 0;
+        break;
+      case 3:
+        puts("\n3. Running tests with use_first_pass, forwarding system pass");
+        conv_mode = COMBINED_PASSWORD;
+        targv[1] = strdup("use_first_pass");
+        targv[2] = strdup("forward_pass");
+        targc = 3;
+        expected_good_prompts_shown = expected_bad_prompts_shown = 0;
+        break;
+      case 4:
+        puts("\n4. Running tests with try_first_pass, combining codes");
+        conv_mode = COMBINED_PASSWORD;
+        targv[1] = strdup("try_first_pass");
+        targc = 2;
+        expected_good_prompts_shown = 0;
+        expected_bad_prompts_shown = 2;
+        break;
+      case 5:
+        puts("\n5. Running tests with try_first_pass, combining codes, "
+             "forwarding system pass");
+        conv_mode = COMBINED_PASSWORD;
+        targv[1] = strdup("try_first_pass");
+        targv[2] = strdup("forward_pass");
+        targc = 3;
+        expected_good_prompts_shown = 0;
+        expected_bad_prompts_shown = 2;
+        break;
+      case 6:
+        puts("\n6. Running tests with try_first_pass, querying for codes");
+        conv_mode = TWO_PROMPTS;
+        helper_used_twice = use_helper;
+        targv[1] = strdup("try_first_pass");
+        targc = 2;
+        expected_good_prompts_shown = expected_bad_prompts_shown = 1;
+        break;
+      default:
+        assert(otp_mode == 7);
+        puts("\n7. Running tests with try_first_pass, querying for codes, "
+             "forwarding system pass");
+        conv_mode = COMBINED_PROMPT;
+        helper_used_twice = use_helper;
+        targv[1] = strdup("try_first_pass");
+        targv[2] = strdup("forward_pass");
+        targc = 3;
+        expected_good_prompts_shown = expected_bad_prompts_shown = 1;
+        break;
+      }
+      // test with use_helper option on second run through
+      if (use_helper){
+        targv[targc++] = strdup("use_helper=" HELPER_PATH);
+      }
+
+      // Make sure num_prompts_shown is still 0.
+      verify_prompts_shown(0);
+
+      // Set the timestamp that this test vector needs
+      set_time(10000*30);
+
+      response = "123456";
+
+      // Check if we can log in when using an invalid verification code
+      puts("Testing failed login attempt");
+      {
+        assert(pam_sm_open_session(NULL, 0, targc, targv) == PAM_SESSION_ERR);
+        verify_prompts_shown(expected_bad_prompts_shown);
+      }
+
+      // Check required number of digits
+      if (conv_mode == TWO_PROMPTS) {
+        puts("Testing required number of digits");
+        response = "50548";
+        assert(pam_sm_open_session(NULL, 0, targc, targv) == PAM_SESSION_ERR);
+        verify_prompts_shown(expected_bad_prompts_shown);
+        response = "0050548";
+        assert(pam_sm_open_session(NULL, 0, targc, targv) == PAM_SESSION_ERR);
+        verify_prompts_shown(expected_bad_prompts_shown);
+        response = "00050548";
+        assert(pam_sm_open_session(NULL, 0, targc, targv) == PAM_SESSION_ERR);
+        verify_prompts_shown(expected_bad_prompts_shown);
+      }
+
+      // Test a blank response
+      puts("Testing a blank response");
+      {
+        response = "";
+        assert(pam_sm_open_session(NULL, 0, targc, targv) == PAM_SESSION_ERR);
+        verify_prompts_shown(expected_bad_prompts_shown);
+      }
+
+      // Set the response that we should send back to the authentication module
+      response = strdup(default_response);
+
+      // Test handling of missing state files
+      puts("Test handling of missing state files");
+      {
+        const char *old_secret = targv[0];
+        targv[0] = "secret=/NOSUCHFILE";
+        assert(pam_sm_open_session(NULL, 0, targc, targv) == PAM_SESSION_ERR);
+        verify_prompts_shown(0);
+        targv[targc++] = "nullok";
+        targv[targc] = NULL;
+        assert(pam_sm_open_session(NULL, 0, targc, targv) == PAM_SUCCESS);
+        verify_prompts_shown(0);
+        targv[--targc] = NULL;
+        targv[0] = old_secret;
+      }
+
+      // Check if we can log in when using a valid verification code
+      puts("Testing successful login");
+      {
+        assert(pam_sm_open_session(NULL, 0, targc, targv) == PAM_SUCCESS);
+        verify_prompts_shown(expected_good_prompts_shown);
+      }
+
+      // Test the WINDOW_SIZE option
+      puts("Testing WINDOW_SIZE option");
+      {
+        for (int *tm  = (int []){ 9998, 9999, 10001, 10002, 10000, -1 },
+                 *res = (int []){ PAM_SESSION_ERR, PAM_SUCCESS, PAM_SUCCESS,
+                                  PAM_SESSION_ERR, PAM_SUCCESS };
+             *tm >= 0;) {
+          set_time(*tm++ * 30);
+          assert(pam_sm_open_session(NULL, 0, targc, targv) == *res++);
+          verify_prompts_shown(expected_good_prompts_shown);
+        }
+        assert(!chmod(fn, 0600));
+        assert((fd = open(fn, O_APPEND | O_WRONLY)) >= 0);
+        assert(write(fd, "\n\" WINDOW_SIZE 6\n", 17) == 17);
+        close(fd);
+        for (int *tm  = (int []){ 9996, 9997, 10002, 10003, 10000, -1 },
+                 *res = (int []){ PAM_SESSION_ERR, PAM_SUCCESS, PAM_SUCCESS,
+                                  PAM_SESSION_ERR, PAM_SUCCESS };
+             *tm >= 0;) {
+          set_time(*tm++ * 30);
+          assert(pam_sm_open_session(NULL, 0, targc, targv) == *res++);
+          verify_prompts_shown(expected_good_prompts_shown);
+        }
+      }
+
+      // Test the DISALLOW_REUSE option
+      puts("Testing DISALLOW_REUSE option");
+      {
+        assert(pam_sm_open_session(NULL, 0, targc, targv) == PAM_SUCCESS);
+        verify_prompts_shown(expected_good_prompts_shown);
+        assert(!chmod(fn, 0600));
+        assert((fd = open(fn, O_APPEND | O_WRONLY)) >= 0);
+        assert(write(fd, "\" DISALLOW_REUSE\n", 17) == 17);
+        close(fd);
+        assert(pam_sm_open_session(NULL, 0, targc, targv) == PAM_SUCCESS);
+        verify_prompts_shown(expected_good_prompts_shown);
+        assert(pam_sm_open_session(NULL, 0, targc, targv) == PAM_SESSION_ERR);
+        verify_prompts_shown(expected_good_prompts_shown);
+
+        // Test that DISALLOW_REUSE expires old entries from the re-use list
+        char *old_response = response;
+        for (int i = 10001; i < 10008; ++i) {
+          set_time(i * 30);
+          response = compute_code_s(binary_secret, binary_secret_len, i);
+          assert(pam_sm_open_session(NULL, 0, targc, targv) == PAM_SUCCESS);
+          verify_prompts_shown(expected_good_prompts_shown);
+        }
+        set_time(10000 * 30);
+        response = old_response;
+        assert((fd = open(fn, O_RDONLY)) >= 0);
+        assert(read(fd, state_file_buf, sizeof(state_file_buf)-1) > 0);
+        close(fd);
+        const char *disallow = strstr(state_file_buf, "\" DISALLOW_REUSE ");
+        assert(disallow);
+        assert(!memcmp(disallow + 17,
+                       "10002 10003 10004 10005 10006 10007\n", 36));
+      }
+
+      // Test the RATE_LIMIT option
+      puts("Testing RATE_LIMIT option");
+      {
+        assert(!chmod(fn, 0600));
+        assert((fd = open(fn, O_APPEND | O_WRONLY)) >= 0);
+        assert(write(fd, "\" RATE_LIMIT 4 120\n", 19) == 19);
+        close(fd);
+        int *tm, *res, *exp_prompts;
+        int num_queries = 0;
+        char *rate_limit_exp;
+        int prompt = expected_good_prompts_shown;
+
+        if (helper_used_twice){
+          // when using helper and try_first_pass and first_pass fails,
+          // 2 attempts are recorded by the helper
+          num_queries = 5;
+          tm = (int []){ 20000, 20001, 20002, 20005, 20009 };
+          res = (int []){ PAM_SUCCESS, PAM_SUCCESS, PAM_SESSION_ERR,
+                          PAM_SESSION_ERR, PAM_SUCCESS };
+          // when using helper, rate limiting is done by the helper
+          // after the user has already been prompted
+          exp_prompts = (int []){ prompt, prompt, 0, prompt, prompt };
+          rate_limit_exp = "4 120 600150 600150 600270 600270\n";
+        } else {
+          num_queries = 6;
+          tm = (int []){ 20000, 20001, 20002, 20003, 20004, 20006 };
+          res = (int []){ PAM_SUCCESS, PAM_SUCCESS, PAM_SUCCESS,
+                          PAM_SUCCESS, PAM_SESSION_ERR, PAM_SUCCESS };
+          int fail = use_helper ? expected_good_prompts_shown : 0;
+          exp_prompts = (int []){ prompt, prompt, prompt, prompt,
+                                  fail, prompt, prompt };
+          rate_limit_exp = "4 120 600060 600090 600120 600180\n";
+        }
+        for (int i = 0; i < num_queries; i++) {
+          set_time(tm[i] * 30);
+          response = compute_code_s(binary_secret, binary_secret_len, tm[i]);
+          assert(pam_sm_open_session(NULL, 0, targc, targv) == res[i]);
+          verify_prompts_shown(exp_prompts[i]);
+        }
+        set_time(10000 * 30);
+        response = strdup(default_response);
+        assert(!chmod(fn, 0600));
+        assert((fd = open(fn, O_RDWR)) >= 0);
+        memset(state_file_buf, 0, sizeof(state_file_buf));
+        assert(read(fd, state_file_buf, sizeof(state_file_buf)-1) > 0);
+        const char *rate_limit = strstr(state_file_buf, "\" RATE_LIMIT ");
+        assert(rate_limit);
+        assert(!memcmp(rate_limit + 13, rate_limit_exp, sizeof(rate_limit_exp)));
+
+        // Test trailing space in RATE_LIMIT. This is considered a file format
+        // error.
+        puts("Testing trailing space in RATE_LIMIT");
+        char *eol = strchr(rate_limit, '\n');
+        *eol = ' ';
+        assert(!lseek(fd, 0, SEEK_SET));
+        assert(write(fd, state_file_buf, strlen(state_file_buf)) ==
+               strlen(state_file_buf));
+        close(fd);
+        assert(pam_sm_open_session(NULL, 0, targc, targv) == PAM_SESSION_ERR);
+
+        // helper checks RATE_LIMIT validity after module prompts user
+        int exp_prompts_on_error = (use_helper && !helper_used_twice)
+                                    ? expected_good_prompts_shown : 0;
+        verify_prompts_shown(exp_prompts_on_error);
+        if (!use_helper){ // TODO: implement getting error message from helper
+          assert(!strncmp(get_error_msg(),
+                          "Invalid list of timestamps in RATE_LIMIT", 40));
+        }
+        *eol = '\n';
+        assert(!chmod(fn, 0600));
+        assert((fd = open(fn, O_WRONLY)) >= 0);
+        assert(write(fd, state_file_buf, strlen(state_file_buf)) ==
+               strlen(state_file_buf));
+        close(fd);
+      }
+
+      // Test TIME_SKEW option
+      // auto-time skew doesn't work when using helper with try_first_pass
+      if (!helper_used_twice) {
+        puts("Testing TIME_SKEW");
+        for (int i = 0; i < 4; ++i) {
+          set_time((12000 + i)*30);
+          response = compute_code_s(binary_secret, binary_secret_len, 11000 + i);
+          assert(pam_sm_open_session(NULL, 0, targc, targv) ==
+                 (i >= 2 ? PAM_SUCCESS : PAM_SESSION_ERR));
+          verify_prompts_shown(expected_good_prompts_shown);
+        }
+        set_time(12010 * 30);
+        response = compute_code_s(binary_secret, binary_secret_len, 11010);
+        assert(pam_sm_open_session(NULL, 0, 1,
+                                   (const char *[]){ "noskewadj", 0 }) ==
+               PAM_SESSION_ERR);
+        verify_prompts_shown(0);
+        set_time(10000*30);
+      }
+
+      // Test scratch codes
+      puts("Testing scratch codes");
+      {
+        response = "12345678";
+        assert(pam_sm_open_session(NULL, 0, targc, targv) == PAM_SESSION_ERR);
+        verify_prompts_shown(expected_bad_prompts_shown);
+        assert(!chmod(fn, 0600));
+        assert((fd = open(fn, O_APPEND | O_WRONLY)) >= 0);
+        assert(write(fd, "12345678\n", 9) == 9);
+        close(fd);
+        set_time(10005 * 30);
+        assert(pam_sm_open_session(NULL, 0, targc, targv) == PAM_SUCCESS);
+        verify_prompts_shown(expected_good_prompts_shown);
+        set_time(10010 * 30);
+        assert(pam_sm_open_session(NULL, 0, targc, targv) == PAM_SESSION_ERR);
+        verify_prompts_shown(expected_bad_prompts_shown);
+      }
+
+      // Check if we can log in when using a valid verification code
+      puts("Testing successful counter-based login");
+      {
+        // Set up secret file for counter-based codes.
+        assert(!chmod(fn, 0600));
+        assert((fd = open(fn, O_TRUNC | O_WRONLY)) >= 0);
+        assert(write(fd, secret, sizeof(secret)-1) == sizeof(secret)-1);
+        assert(write(fd, "\n\" HOTP_COUNTER 1\n", 18) == 18);
+        close(fd);
+        int use_counter = helper_used_twice ? 2 : 1;
+        response = compute_code_s(binary_secret, binary_secret_len, use_counter);
+
+        assert(pam_sm_open_session(NULL, 0, targc, targv) == PAM_SUCCESS);
+        verify_prompts_shown(expected_good_prompts_shown);
+
+        // Verify that the hotp counter incremented
+        assert((fd = open(fn, O_RDONLY)) >= 0);
+        memset(state_file_buf, 0, sizeof(state_file_buf));
+        assert(read(fd, state_file_buf, sizeof(state_file_buf)-1) > 0);
+        close(fd);
+        const char *hotp_counter = strstr(state_file_buf, "\" HOTP_COUNTER ");
+        assert(hotp_counter);
+
+        char *new_counter = helper_used_twice ? "3\n" : "2\n";
+        assert(!memcmp(hotp_counter + 15, new_counter, 2));
+      }
+
+      // Check if we can log in when using an invalid verification code
+      // (including the same code a second time)
+      puts("Testing failed counter-based login attempt");
+      {
+        assert(pam_sm_open_session(NULL, 0, targc, targv) == PAM_SESSION_ERR);
+        verify_prompts_shown(expected_bad_prompts_shown);
+
+        // Verify that the hotp counter incremented
+        assert((fd = open(fn, O_RDONLY)) >= 0);
+        memset(state_file_buf, 0, sizeof(state_file_buf));
+        assert(read(fd, state_file_buf, sizeof(state_file_buf)-1) > 0);
+        close(fd);
+        const char *hotp_counter = strstr(state_file_buf, "\" HOTP_COUNTER ");
+        assert(hotp_counter);
+        char *new_counter = helper_used_twice ? "5\n" : "3\n";
+        assert(!memcmp(hotp_counter + 15, new_counter, 2));
+      }
+
+      // Check if we can log in using a future valid verification code (using
+      // default window_size of 3)
+      puts("Testing successful future counter-based login");
+      {
+        int use_counter = helper_used_twice ? 8 : 5;
+        response = compute_code_s(binary_secret, binary_secret_len, use_counter);
+        assert(pam_sm_open_session(NULL, 0, targc, targv) == PAM_SUCCESS);
+        verify_prompts_shown(expected_good_prompts_shown);
+
+        // Verify that the hotp counter incremented
+        assert((fd = open(fn, O_RDONLY)) >= 0);
+        memset(state_file_buf, 0, sizeof(state_file_buf));
+        assert(read(fd, state_file_buf, sizeof(state_file_buf)-1) > 0);
+        close(fd);
+        const char *hotp_counter = strstr(state_file_buf, "\" HOTP_COUNTER ");
+        assert(hotp_counter);
+        char *new_counter = helper_used_twice ? "9\n" : "6\n";
+        assert(!memcmp(hotp_counter + 15, new_counter, 2));
+      }
+
+      // Remove the temporarily created secret file
+      unlink(fn);
+
+      // Release memory for the test arguments
+      for (int i = 0; i < targc; ++i) {
+        free((void *)targv[i]);
+      }
     }
   }
 

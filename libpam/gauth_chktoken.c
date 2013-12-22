@@ -1,5 +1,3 @@
-
-
 #include <sys/param.h>
 
 #define MAX_PASS 208 /* cater for pw and code when using forward_pass */
@@ -19,7 +17,15 @@
 
 #include "support.h"
 
-#define MODULE_NAME "gauth_chktoken";
+#if defined(TESTING)
+  #define MODULE_NAME "gauth_chktoken_testing";
+  #define NUM_ARGS 3
+#else
+  #define MODULE_NAME "gauth_chktoken";
+  #define NUM_ARGS 2
+#endif
+
+
 
 extern void log_message(int priority, pam_handle_t *pamh,
                         const char *format, ...) {
@@ -27,16 +33,9 @@ extern void log_message(int priority, pam_handle_t *pamh,
 
   va_list args;
   va_start(args, format);
-#if !defined(DEMO) && !defined(TESTING)
   openlog(logname, LOG_CONS | LOG_PID, LOG_AUTHPRIV);
   vsyslog(priority, format, args);
   closelog();
-#else
-  if (!*error_msg) {
-    vsnprintf(error_msg, sizeof(error_msg), format, args);
-  }
-#endif
-
   va_end(args);
 
   if (priority == LOG_EMERG) {
@@ -65,6 +64,7 @@ static int open_secret_file(const char *secret_filename,
   }
 
   // Check permissions on secret file
+#if !defined(TESTING)
   if ((sb.st_mode & 03577) != 0400 ||
       !S_ISREG(sb.st_mode) ||
       sb.st_uid != (uid_t)owner_uid)
@@ -77,6 +77,7 @@ static int open_secret_file(const char *secret_filename,
                 secret_filename, owner);
     goto error;
   }
+#endif
 
   // Sanity check for file length
   if (sb.st_size < 1 || sb.st_size > 64*1024) {
@@ -110,6 +111,11 @@ static int parse_args(const int argc, const char **argv,
 
   // param 1: secret_filename
   *secret_filename = strdup(argv[1]);
+
+#if defined(TESTING)
+  time_t new_time = atol(argv[2]);
+  set_time(new_time);
+#endif
 
   return 0;
 }
@@ -273,7 +279,7 @@ int main(int argc, const char *argv[]) {
   int        owner_uid = -1;
   char       *forwarded_pw = NULL;
 
-  if (isatty(STDIN_FILENO) || argc != 4 ) {
+  if (isatty(STDIN_FILENO) || argc != NUM_ARGS ) {
     log_message(LOG_NOTICE, pamh, "inappropriate use of chktoken helper binary");
     return PAM_SYSTEM_ERR;
   }

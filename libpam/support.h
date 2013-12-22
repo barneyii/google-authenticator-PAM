@@ -7,6 +7,11 @@
 
 #include <security/pam_modules.h>
 
+#ifdef TESTING
+void set_time(time_t t);
+time_t get_time(void);
+#endif
+
 typedef struct Params {
   const char *secret_filename_spec;
   enum { NULLERR=0, NULLOK, SECRETNOTFOUND } nullok;
@@ -19,7 +24,6 @@ typedef struct Params {
   int        use_helper;
   char      *helper_path;
 } Params;
-
 
 extern void log_message(int priority, pam_handle_t *pamh,
                         const char *format, ...);

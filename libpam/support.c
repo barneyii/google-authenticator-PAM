@@ -157,7 +157,7 @@ void set_time(time_t t) {
   current_time = t;
 }
 
-static time_t get_time(void) {
+time_t get_time(void) {
   return current_time;
 }
 #else

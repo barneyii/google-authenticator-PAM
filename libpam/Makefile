@@ -19,64 +19,65 @@ VERSION := 1.0
 .SUFFIXES: .so
 
 ifeq ($(origin CC), default)
-  CC := gcc
+	CC := gcc
 endif
 
 DEF_CFLAGS := $(shell [ `uname` = SunOS ] &&                                  \
-                echo ' -D_POSIX_PTHREAD_SEMANTICS -D_REENTRANT')              \
-              -fvisibility=hidden $(CFLAGS)
+								echo ' -D_POSIX_PTHREAD_SEMANTICS -D_REENTRANT')              \
+							-fvisibility=hidden $(CFLAGS)
 DEF_LDFLAGS := $(shell [ `uname` = SunOS ] && echo ' -mimpure-text') $(LDFLAGS)
 LDL_LDFLAGS := $(shell $(CC) -shared -ldl -xc -o /dev/null /dev/null          \
-                       >/dev/null 2>&1 && echo ' -ldl')
+											 >/dev/null 2>&1 && echo ' -ldl')
 
-all: google-authenticator pam_google_authenticator.so  demo                    \
-     gauth_chktoken pam_google_authenticator_unittest
+all: google-authenticator pam_google_authenticator.so demo                    \
+		 gauth_chktoken gauth_chktoken_testing pam_google_authenticator_unittest
 
-test: pam_google_authenticator_unittest
+test: pam_google_authenticator_unittest gauth_chktoken_testing
 	./pam_google_authenticator_unittest
 
 dist: clean all test
 	$(RM) libpam-google-authenticator-$(VERSION)-source.tar.bz2
 	tar jfc libpam-google-authenticator-$(VERSION)-source.tar.bz2         \
-	    --xform="s,^,libpam-google-authenticator-$(VERSION)/,"            \
-	    --owner=root --group=root                                         \
-	    *.c *.h *.html Makefile FILEFORMAT README utc-time
+			--xform="s,^,libpam-google-authenticator-$(VERSION)/,"            \
+			--owner=root --group=root                                         \
+			*.c *.h *.html Makefile FILEFORMAT README utc-time
 
 install: all
 	@dst="`find /lib*/security /lib*/*/security -maxdepth 1               \
-	            -name pam_unix.so -printf '%H' -quit 2>/dev/null`";       \
+							-name pam_unix.so -printf '%H' -quit 2>/dev/null`";       \
 	[ -d "$${dst}" ] || dst=/lib/security;                                \
 	[ -d "$${dst}" ] || dst=/usr/lib;                                     \
 	sudo=; if [ $$(id -u) -ne 0 ]; then                                   \
-	  echo "You need to be root to install this module.";                 \
-	  if [ -x /usr/bin/sudo ]; then                                       \
-	    echo "Invoking sudo:";                                            \
-	    sudo=sudo;                                                        \
-	  else                                                                \
-	    exit 1;                                                           \
-	  fi;                                                                 \
+		echo "You need to be root to install this module.";                 \
+		if [ -x /usr/bin/sudo ]; then                                       \
+			echo "Invoking sudo:";                                            \
+			sudo=sudo;                                                        \
+		else                                                                \
+			exit 1;                                                           \
+		fi;                                                                 \
 	fi;                                                                   \
 	echo cp pam_google_authenticator.so $${dst};                          \
 	tar fc - pam_google_authenticator.so | $${sudo} tar ofxC - $${dst};   \
-	                                                                      \
+																																				\
 	echo cp google-authenticator /usr/local/bin;                          \
 	tar fc - google-authenticator | $${sudo} tar ofxC - /usr/local/bin;   \
 	$${sudo} chmod 755 $${dst}/pam_google_authenticator.so                \
-	                   /usr/local/bin/google-authenticator;               \
-                                                                        \
-  echo cp gauth_chktoken /usr/sbin;                                     \
-  sudo cp gauth_chktoken /usr/sbin;                                     \
-  $${sudo} chmod 6755 /usr/sbin/gauth_chktoken;                         \
-                                                                        \
-  echo cp google-authenticator.conf.sample                              \
-  				/etc/google-authenticator.conf;                               \
-  $${sudo} cp google-authenticator.conf.sample                          \
-  				/etc/google-authenticator.conf;                               \
+										 /usr/local/bin/google-authenticator;               \
+																																				\
+	echo cp gauth_chktoken /usr/sbin;                                     \
+	sudo cp gauth_chktoken /usr/sbin;                                     \
+	$${sudo} chmod 6755 /usr/sbin/gauth_chktoken;                         \
+																																				\
+	echo cp google-authenticator.conf.sample                              \
+					/etc/google-authenticator.conf;                               \
+	$${sudo} cp google-authenticator.conf.sample                          \
+					/etc/google-authenticator.conf;                               \
 
 clean:
 	$(RM) *.o *.so core google-authenticator gauth_chktoken demo          \
-	               pam_google_authenticator_unittest                      \
-	               libpam-google-authenticator-*-source.tar.bz2
+								 gauth_chktoken_testing                                 \
+								 pam_google_authenticator_unittest                      \
+								 libpam-google-authenticator-*-source.tar.bz2
 
 
 google-authenticator.o: google-authenticator.c base32.h hmac.h sha1.h
@@ -88,13 +89,11 @@ pam_google_authenticator.o: pam_google_authenticator.c support.h base32.h     \
 														hmac.h sha1.h
 pam_google_authenticator.so: support.o base32.o hmac.o sha1.o
 
-
 gauth_chktoken.o: gauth_chktoken.c support.h
 gauth_chktoken: gauth_chktoken.o support.o base32.o hmac.o sha1.o
 	$(CC) -g $(DEF_LDFLAGS) -o $@ $+ $(LDL_LDFLAGS)
 
-
-pam_google_authenticator_demo.o: pam_google_authenticator.c support.h 				\
+pam_google_authenticator_demo.o: pam_google_authenticator.c support.h         \
 																 base32.h hmac.h sha1.h
 	# $(CC) -DDEMO --std=gnu99 -Wall -O2 -g -fPIC -c $(DEF_CFLAGS) -o $@ $<
 	$(CC) -DDEMO --std=gnu99 -Wall -O0 -g -fPIC -c $(DEF_CFLAGS) -o $@ $<
@@ -104,15 +103,22 @@ demo: demo.o pam_google_authenticator_demo.o support.o base32.o hmac.o sha1.o
 
 support_testing.o: support.c support.h base32.h hmac.h sha1.h
 	$(CC) -DTESTING --std=gnu99 -Wall -O2 -g -fPIC -c $(DEF_CFLAGS) -o $@ $<
-pam_google_authenticator_testing.o: pam_google_authenticator.c support.h		  \
+
+pam_google_authenticator_testing.o: pam_google_authenticator.c support.h      \
 																		base32.h hmac.h sha1.h
-	$(CC) -DTESTING --std=gnu99 -Wall -O2 -g -fPIC -c $(DEF_CFLAGS) -o $@ $<
+	$(CC) -DTESTING --std=gnu99 -Wall -O0 -g -fPIC -c $(DEF_CFLAGS) -o $@ $<
 pam_google_authenticator_testing.so: support_testing.o base32.o hmac.o sha1.o
+
+gauth_chktoken_testing.o: gauth_chktoken.c support.h
+	$(CC) -DTESTING --std=gnu99 -Wall -O0 -g -fPIC -c $(DEF_CFLAGS) -o $@ $<
+gauth_chktoken_testing: gauth_chktoken_testing.o support_testing.o base32.o hmac.o sha1.o
+	$(CC) -g $(DEF_LDFLAGS) -o $@ $+ $(LDL_LDFLAGS)
+
 pam_google_authenticator_unittest.o: pam_google_authenticator_unittest.c      \
-                                     pam_google_authenticator_testing.so      \
-                                     base32.h hmac.h sha1.h
+																		 pam_google_authenticator_testing.so      \
+																		 base32.h hmac.h sha1.h
 pam_google_authenticator_unittest: pam_google_authenticator_unittest.o        \
-                                   base32.o hmac.o sha1.o
+																	 base32.o hmac.o sha1.o
 	$(CC) -g $(DEF_LDFLAGS) -rdynamic -o $@ $+ -lc $(LDL_LDFLAGS)
 
 

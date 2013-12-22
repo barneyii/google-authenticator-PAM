@@ -72,6 +72,7 @@ const char *get_error_msg(void) {
 
 extern void log_message(int priority, pam_handle_t *pamh,
                         const char *format, ...) {
+  static char current_msg[128];
   char *service = NULL;
   if (pamh)
     pam_get_item(pamh, PAM_SERVICE, (void *)&service);
@@ -83,13 +84,16 @@ extern void log_message(int priority, pam_handle_t *pamh,
 
   va_list args;
   va_start(args, format);
-#if !defined(TESTING)
+  vsnprintf(current_msg, sizeof(current_msg), format, args);
+  // send to log
   openlog(logname, LOG_CONS | LOG_PID, LOG_AUTHPRIV);
-  vsyslog(priority, format, args);
+  syslog(priority, current_msg);
   closelog();
-#else
+#if defined(TESTING)
+  // print to stderr
+  if (priority==LOG_DEBUG) fprintf(stderr, "%s\n", current_msg);
   if (!*error_msg) {
-    vsnprintf(error_msg, sizeof(error_msg), format, args);
+    strcpy(error_msg, current_msg);
   }
 #endif
 
@@ -418,7 +422,6 @@ static char *request_pass(pam_handle_t *pamh, int echocode,
     }
     free(resp);
   }
-
   return ret;
 }
 
@@ -621,6 +624,13 @@ static int run_helper_binary(pam_handle_t *pamh,
     args[0] = strdup(params->helper_path);
     args[1] = strdup(secret_filename);
 
+#ifdef TESTING
+    // pass test-specified current time
+    char the_time[15];
+    sprintf(the_time, "%d", (int)get_time());
+    args[2]=the_time;
+#endif
+
     execve(params->helper_path, args, envp);
 
     /* should not get here: exit with error */
@@ -677,7 +687,6 @@ static int run_helper_binary(pam_handle_t *pamh,
 
   sigaction(SIGCHLD, &oldsa, NULL);   /* restore old signal handler */
 
-  log_message(LOG_INFO, pamh, "returning: %d", retval);
   return retval;
 }
 
@@ -752,6 +761,7 @@ static int auth_helper(pam_handle_t *pamh,
     free(forwarded_pw);
   }
 
+  // log_message(LOG_DEBUG, pamh, "returning: %d", rc);
   return rc;
 }
 
